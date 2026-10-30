@@ -626,6 +626,70 @@ end)
 queueReload()
 if not rejoinReady() then warn("[FlinFarm] auto-restart after rejoin is NOT ready: set Script URL in the Safety tab") end
 
+-- ───────── auto "Play" after (re)join ─────────
+local function isShown(obj)
+    local cur = obj
+    while cur and cur ~= game do
+        if cur:IsA("GuiObject") and not cur.Visible then return false end
+        if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+        cur = cur.Parent
+    end
+    return true
+end
+local function isPlayText(s)
+    s = tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    return s == "Играть" or s == "ИГРАТЬ" or s:lower() == "play"
+end
+local function pressButton(btn)
+    local used = false
+    if firesignal then
+        for _, ev in ipairs({"MouseButton1Down", "MouseButton1Up", "MouseButton1Click", "Activated"}) do
+            if pcall(firesignal, btn[ev]) then used = true end
+        end
+    end
+    if getconnections then
+        for _, ev in ipairs({"MouseButton1Down", "MouseButton1Up", "MouseButton1Click", "Activated"}) do
+            pcall(function()
+                for _, c in ipairs(getconnections(btn[ev])) do
+                    pcall(function() c:Fire() end)
+                    used = true
+                end
+            end)
+        end
+    end
+    if not used then
+        pcall(function()
+            local vim = game:GetService("VirtualInputManager")
+            local p = btn.AbsolutePosition + btn.AbsoluteSize / 2 + GuiService:GetGuiInset()
+            vim:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 0)
+            task.wait(0.05)
+            vim:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 0)
+        end)
+    end
+end
+local startedAt = os.clock()
+task.spawn(function()
+    while alive do
+        task.wait(1.2)
+        local ch = LP.Character
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        local needPlay = not (ch and hum and hum.Health > 0)
+        if needPlay and (cfg.farm or os.clock() - startedAt < 240) then
+            local pg = LP:FindFirstChild("PlayerGui")
+            if pg then
+                for _, d in ipairs(pg:GetDescendants()) do
+                    if d:IsA("TextButton") and isPlayText(d.Text) and isShown(d) and d.AbsoluteSize.X > 20 then
+                        setStatus("Pressing Play", AMBER)
+                        pressButton(d)
+                        task.wait(2)
+                        break
+                    end
+                end
+            end
+        end
+    end
+end)
+
 -- ───────── potato mode (no textures) + white screen ─────────
 local potatoDone = setmetatable({}, {__mode = "k"})
 local potatoConn, potatoQueue = nil, {}
@@ -1100,7 +1164,7 @@ task.spawn(function()
         local el = os.clock() - session.start
         local visible = main.Visible
         if rejoinReady() then
-            subtitle.Text = "v3 · auto farm · full stats · auto rejoin ready"
+            subtitle.Text = "v4 · auto farm · full stats · auto rejoin ready"
             subtitle.TextColor3 = C.sub
         else
             subtitle.Text = "! paste Script URL in Safety for auto-restart"
@@ -1157,12 +1221,7 @@ applyRender()
 applyWhite()
 if cfg.potato then applyPotato(true) end
 if cfg.autoStart and wasFarming then
-    task.spawn(function()
-        for _ = 1, 40 do
-            if LP.Character and LP.Character:FindFirstChild("HumanoidRootPart") then break end
-            task.wait(0.5)
-        end
-        task.wait(2)
+    task.delay(2, function()
         cfg.farm = true
         for _, r in ipairs(setters) do pcall(r) end
     end)
