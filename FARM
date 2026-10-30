@@ -33,7 +33,7 @@ end
 -- ───────── saved data ─────────
 local DIR, FILE = "FlinFarm", "FlinFarm/data.json"
 local cfg = {
-    farm = false, method = "Glide", speed = 24, touchRadius = 8, fullAction = "Fling murderer", hopDist = 24, hopDelay = 0.12,
+    farm = false, method = "Glide", speed = 24, touchRadius = 8, fullAction = "Fling murderer", bagCap = 50, minPlayers = 4, hopDist = 24, hopDelay = 0.12,
     avoid = true, resetFull = true, humanize = true,
     autoRejoin = true, antiAfk = true, autoStart = true, renderOff = false, potato = false, whiteScreen = false, adaptive = true, url = "",
     offset = 4, maxDist = 600,
@@ -98,9 +98,41 @@ local function getChar()
     local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
     if ch and hum and hrp and hum.Health > 0 then return ch, hum, hrp end
 end
+local bagCache, bagCacheAt = false, 0
 local function bagFull()
-    local n = chain(LP:FindFirstChild("PlayerGui"), "MainGUI", "Lobby", "Dock", "CoinBags", "FullBagNotification")
-    return n ~= nil and n.Visible == true
+    if os.clock() - bagCacheAt < 0.25 then return bagCache end
+    bagCacheAt = os.clock()
+    local full = false
+    local pg = LP:FindFirstChild("PlayerGui")
+    local n = chain(pg, "MainGUI", "Lobby", "Dock", "CoinBags", "FullBagNotification")
+    if n and n.Visible then full = true end
+    -- counter check: any bag counter reached the bag size
+    if not full then
+        local box = chain(pg, "MainGUI", "Game", "CoinBags", "Container")
+        if box then
+            for _, bag in ipairs(box:GetChildren()) do
+                local label = bag:FindFirstChild("Coins", true)
+                if label and label:IsA("TextLabel") then
+                    local v = tonumber((label.Text:gsub("[^%d]", ""))) or 0
+                    if v >= cfg.bagCap then full = true break end
+                end
+            end
+        end
+    end
+    -- text check: any visible "Full" / "Заполнено" label in the bag UI
+    if not full then
+        local root = chain(pg, "MainGUI", "Game", "CoinBags") or chain(pg, "MainGUI", "Lobby", "Dock", "CoinBags")
+        if root then
+            for _, d in ipairs(root:GetDescendants()) do
+                if d:IsA("TextLabel") and d.Visible and (d.Text:find("Full") or d.Text:find("FULL") or d.Text:find("Заполнен") or d.Text:find("заполнен")) then
+                    full = true
+                    break
+                end
+            end
+        end
+    end
+    bagCache = full
+    return full
 end
 
 local container
@@ -193,9 +225,13 @@ local function rebuildParts(ch)
     end
 end
 local flying = false
+local lastRebuild = 0
 bind(RunService.Stepped, function()
     if flying and LP.Character then
-        if noclipChar ~= LP.Character then rebuildParts(LP.Character) end
+        if noclipChar ~= LP.Character or os.clock() - lastRebuild > 1.5 then
+            lastRebuild = os.clock()
+            rebuildParts(LP.Character)
+        end
         for i = 1, #noclipParts do
             local p = noclipParts[i]
             if p.CanCollide then p.CanCollide = false end
@@ -205,6 +241,8 @@ end)
 local function prep(hum)
     flying = true
     if not hum.PlatformStand then hum.PlatformStand = true end
+    local root = hum.RootPart
+    if root and root.Anchored then root.Anchored = false end
 end
 local function release()
     if not flying then return end
@@ -278,7 +316,19 @@ local function collect(coin, hum, hrp)
     prep(hum)
     local started = os.clock()
     local touched = false
+    local checkPos, checkAt = hrp.Position, os.clock()
     while alive and cfg.farm and coin.Parent and hrp.Parent and os.clock() - started < 7 do
+        if os.clock() - checkAt > 1.5 then
+            if (hrp.Position - checkPos).Magnitude < 0.5 then
+                -- stuck: snap straight onto the coin once, otherwise give up on it
+                hrp.CFrame = CFrame.new(coin.Position - Vector3.new(0, cfg.offset, 0)) * ROT
+                touch(hrp, coin)
+                ignored[coin] = true
+                task.delay(20, function() ignored[coin] = nil end)
+                return "stuck"
+            end
+            checkPos, checkAt = hrp.Position, os.clock()
+        end
         local target = coin.Position - Vector3.new(0, cfg.offset, 0)
         local diff = target - hrp.Position
         local dist = diff.Magnitude
@@ -321,6 +371,7 @@ local function collect(coin, hum, hrp)
     end
 end
 
+local stuckCount = 0
 task.spawn(function()
     while alive do
         if not cfg.farm then
@@ -338,7 +389,8 @@ task.spawn(function()
                 local act = cfg.fullAction
                 if act == "Fling murderer" then
                     setStatus("Bag full → fling murderer", AMBER)
-                    pcall(flingMurderer)
+                    local okF, flung = pcall(flingMurderer)
+                    if not (okF and flung) then setStatus("No murderer found → waiting", AMBER) task.wait(1) end
                     setStatus("Waiting for round end", AMBER)
                     local t0 = os.clock()
                     while alive and cfg.farm and findContainer() and bagFull() and os.clock() - t0 < 25 do
@@ -369,7 +421,19 @@ task.spawn(function()
                     task.wait(0.15)
                 else
                     setStatus("Farming", GREEN)
-                    pcall(collect, coin, hum, hrp)
+                    local okc, res = pcall(collect, coin, hum, hrp)
+                    if okc and res == "stuck" then
+                        stuckCount += 1
+                        if stuckCount >= 3 then
+                            stuckCount = 0
+                            setStatus("Stuck → reset", AMBER)
+                            release()
+                            hum.Health = 0
+                            task.wait(4)
+                        end
+                    else
+                        stuckCount = 0
+                    end
                 end
             end
         end
@@ -435,6 +499,58 @@ local function queueReload(force)
     queued = ok
     return ok
 end
+local hopping = false
+local function serverHop(reason)
+    if hopping or rejoining then return end
+    hopping = true
+    setStatus("Low players → server hop", AMBER)
+    totals.lastReason = tostring(reason):sub(1, 60)
+    totals.rejoins += 1
+    save(true)
+    queueReload()
+    task.spawn(function()
+        local target
+        pcall(function()
+            local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Desc&limit=100"
+            local data = HttpService:JSONDecode(game:HttpGet(url))
+            local pool = {}
+            for _, s in ipairs(data.data or {}) do
+                if s.id ~= game.JobId and s.playing and s.maxPlayers
+                    and s.playing >= math.max(cfg.minPlayers + 2, 6) and s.playing < s.maxPlayers - 1 then
+                    pool[#pool + 1] = s.id
+                end
+            end
+            if #pool > 0 then target = pool[math.random(1, math.min(#pool, 10))] end
+        end)
+        for attempt = 1, 4 do
+            if not alive then return end
+            if target then
+                pcall(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, target, LP) end)
+            else
+                pcall(function() TeleportService:Teleport(game.PlaceId, LP) end)
+            end
+            task.wait(12)
+        end
+        hopping = false
+    end)
+end
+task.spawn(function()
+    local low, since = 0, os.clock()
+    while alive do
+        task.wait(3)
+        if cfg.farm and cfg.minPlayers > 0 and not hopping and not rejoining and os.clock() - since > 15 then
+            if #Players:GetPlayers() < cfg.minPlayers then
+                low += 1
+                if low >= 3 then
+                    low = 0
+                    serverHop("players < " .. cfg.minPlayers)
+                end
+            else
+                low = 0
+            end
+        end
+    end
+end)
 local function rejoin(reason)
     if rejoining or not cfg.autoRejoin then return end
     rejoining = true
@@ -855,13 +971,14 @@ toggleRow(sc, 168, "Potato mode (no textures)", "potato", applyPotato)
 toggleRow(sc, 202, "White screen", "whiteScreen", applyWhite)
 toggleRow(sc, 236, "Lower speed after kick", "adaptive")
 local tips = card(safePg, "Tuning", UDim2.new(0.5, 7, 0, 0), UDim2.new(0.5, -7, 1, 0))
-sliderRow(tips, 32, "Underground depth", "offset", 1, 12)
-sliderRow(tips, 84, "Hop distance", "hopDist", 8, 60)
-toggleRow(tips, 140, "Humanize movement", "humanize")
+sliderRow(tips, 28, "Underground depth", "offset", 1, 12)
+sliderRow(tips, 72, "Bag size (full at)", "bagCap", 10, 200)
+sliderRow(tips, 116, "Min players (0 = off)", "minPlayers", 0, 12)
+toggleRow(tips, 162, "Humanize movement", "humanize")
 local urlBox = New("TextBox", {
     Text = cfg.url, PlaceholderText = "Script RAW URL (for auto-start after rejoin)", ClearTextOnFocus = false,
     FontFace = FONT, TextSize = 13, TextColor3 = C.text, PlaceholderColor3 = C.sub, BackgroundColor3 = C.elem,
-    Position = UDim2.fromOffset(12, 186), Size = UDim2.new(1, -24, 0, 26), TextXAlignment = Enum.TextXAlignment.Left,
+    Position = UDim2.fromOffset(12, 198), Size = UDim2.new(1, -24, 0, 26), TextXAlignment = Enum.TextXAlignment.Left,
     TextTruncate = Enum.TextTruncate.AtEnd,
 }, tips)
 round(urlBox, 8)
@@ -871,7 +988,7 @@ urlBox.FocusLost:Connect(function()
     save(true)
     queueReload(true)
 end)
-local hint = text(tips, "Rejoin-ready: " .. ((SCRIPT_URL ~= "" or cfg.url ~= "") and "yes" or "NO - paste the URL above") .. ". Faster = higher kick risk; speed drops 25% after each kick.", 13, C.sub, UDim2.fromOffset(12, 216), UDim2.new(1, -24, 0, 44))
+local hint = text(tips, "Rejoin-ready: " .. ((SCRIPT_URL ~= "" or cfg.url ~= "") and "yes" or "NO - paste the URL above") .. ". Faster = higher kick risk; speed drops 25% after each kick.", 13, C.sub, UDim2.fromOffset(12, 228), UDim2.new(1, -24, 0, 36))
 hint.TextWrapped = true
 hint.TextYAlignment = Enum.TextYAlignment.Top
 hint.TextTruncate = Enum.TextTruncate.None
