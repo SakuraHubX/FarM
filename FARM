@@ -35,7 +35,7 @@ local DIR, FILE = "FlinFarm", "FlinFarm/data.json"
 local cfg = {
     farm = false, method = "Glide", speed = 90, hopDist = 24, hopDelay = 0.12,
     avoid = true, resetFull = true, humanize = true,
-    autoRejoin = true, antiAfk = true, autoStart = true, renderOff = false, potato = false, whiteScreen = false,
+    autoRejoin = true, antiAfk = true, autoStart = true, renderOff = false, potato = false, whiteScreen = false, adaptive = true, url = "",
     offset = 4, maxDist = 600,
 }
 local totals = {coins = 0, sessions = 0, rounds = 0, kicks = 0, rejoins = 0, bestRate = 0, seconds = 0, lastReason = "-", bags = {}}
@@ -345,8 +345,9 @@ local function queueReload()
     local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
     if not q then return false end
     local code
-    if SCRIPT_URL ~= "" then
-        code = 'loadstring(game:HttpGet("' .. SCRIPT_URL .. '?nocache=" .. os.time()))()'
+    local url = SCRIPT_URL ~= "" and SCRIPT_URL or tostring(cfg.url or "")
+    if url ~= "" then
+        code = 'loadstring(game:HttpGet("' .. url .. '?nocache=" .. os.time()))()'
     elseif isfile and isfile("FlinFarm.lua") then
         code = 'loadstring(readfile("FlinFarm.lua"))()'
     end
@@ -360,7 +361,11 @@ local function rejoin(reason)
     totals.kicks += 1
     totals.rejoins += 1
     totals.lastReason = tostring(reason or "disconnected"):sub(1, 60)
-    cfg.farm = cfg.farm
+    if cfg.adaptive and status == "Farming" and cfg.farm then
+        local old = cfg.speed
+        cfg.speed = math.max(40, math.floor(cfg.speed * 0.75))
+        totals.lastReason = totals.lastReason .. " (speed " .. old .. "→" .. cfg.speed .. ")"
+    end
     save(true)
     setStatus("Rejoining…", AMBER)
     task.spawn(function()
@@ -769,11 +774,24 @@ toggleRow(sc, 100, "Resume farm after rejoin", "autoStart")
 toggleRow(sc, 134, "3D render off (AFK, +FPS)", "renderOff", applyRender)
 toggleRow(sc, 168, "Potato mode (no textures)", "potato", applyPotato)
 toggleRow(sc, 202, "White screen", "whiteScreen", applyWhite)
+toggleRow(sc, 236, "Lower speed after kick", "adaptive")
 local tips = card(safePg, "Tuning", UDim2.new(0.5, 7, 0, 0), UDim2.new(0.5, -7, 1, 0))
 sliderRow(tips, 32, "Underground depth", "offset", 1, 12)
 sliderRow(tips, 84, "Hop distance", "hopDist", 8, 60)
 sliderRow(tips, 136, "Max coin distance", "maxDist", 100, 1500)
-local warn = text(tips, "Faster = higher kick risk. If you get kicked, lower the speed by ~20%. The script reconnects on its own.", 13, C.sub, UDim2.fromOffset(12, 190), UDim2.new(1, -24, 0, 70))
+local urlBox = New("TextBox", {
+    Text = cfg.url, PlaceholderText = "Script RAW URL (for auto-start after rejoin)", ClearTextOnFocus = false,
+    FontFace = FONT, TextSize = 13, TextColor3 = C.text, PlaceholderColor3 = C.sub, BackgroundColor3 = C.elem,
+    Position = UDim2.fromOffset(12, 186), Size = UDim2.new(1, -24, 0, 26), TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+}, tips)
+round(urlBox, 8)
+outline(urlBox, 1)
+urlBox.FocusLost:Connect(function()
+    cfg.url = urlBox.Text:gsub("%s", "")
+    save(true)
+end)
+local warn = text(tips, "Rejoin-ready: " .. ((SCRIPT_URL ~= "" or cfg.url ~= "") and "yes" or "NO - paste the URL above") .. ". Faster = higher kick risk; speed drops 25% after each kick.", 13, C.sub, UDim2.fromOffset(12, 216), UDim2.new(1, -24, 0, 44))
 warn.TextWrapped = true
 warn.TextYAlignment = Enum.TextYAlignment.Top
 warn.TextTruncate = Enum.TextTruncate.None
@@ -885,7 +903,12 @@ applyRender()
 applyWhite()
 if cfg.potato then applyPotato(true) end
 if cfg.autoStart and wasFarming then
-    task.delay(4, function()
+    task.spawn(function()
+        for _ = 1, 40 do
+            if LP.Character and LP.Character:FindFirstChild("HumanoidRootPart") then break end
+            task.wait(0.5)
+        end
+        task.wait(2)
         cfg.farm = true
         for _, r in ipairs(setters) do pcall(r) end
     end)
