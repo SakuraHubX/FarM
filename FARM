@@ -1,0 +1,892 @@
+--[[
+FlinFarm — отдельный автофарм для MM2 (монеты / конфеты ивента)
+Дизайн FlinHUB: тёмно-серая тема, Fredoka One, таблетка со сворачиванием.
+Меню: клавиша G. "–" сворачивает в таблетку, "X" закрывает (G вернёт).
+
+Автореджоин после кика сам перезапускает скрипт на новом сервере. Для этого вставь
+RAW-ссылку на этот файл в SCRIPT_URL (Pastebin). Без ссылки скрипт попробует FlinFarm.lua из workspace.
+]]
+local SCRIPT_URL = "https://raw.githubusercontent.com/MaxFOG120/FL/refs/heads/main/Desig"
+
+-- ───────── cleanup of previous run ─────────
+if getgenv and getgenv().FlinFarmCleanup then pcall(getgenv().FlinFarmCleanup) end
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local TeleportService = game:GetService("TeleportService")
+local GuiService = game:GetService("GuiService")
+local HttpService = game:GetService("HttpService")
+local CoreGui = game:GetService("CoreGui")
+local StatsService = game:GetService("Stats")
+local LP = Players.LocalPlayer
+
+local conns, alive = {}, true
+local function bind(sig, fn)
+    local c = sig:Connect(fn)
+    conns[#conns + 1] = c
+    return c
+end
+
+-- ───────── saved data ─────────
+local DIR, FILE = "FlinFarm", "FlinFarm/data.json"
+local cfg = {
+    farm = false, method = "Glide", speed = 90, hopDist = 24, hopDelay = 0.12,
+    avoid = true, resetFull = true, humanize = true,
+    autoRejoin = true, antiAfk = true, autoStart = true, renderOff = false, potato = false, whiteScreen = false,
+    offset = 4, maxDist = 600,
+}
+local totals = {coins = 0, sessions = 0, rounds = 0, kicks = 0, rejoins = 0, bestRate = 0, seconds = 0, lastReason = "-", bags = {}}
+local wasFarming = false
+pcall(function()
+    if makefolder and not (isfolder and isfolder(DIR)) then makefolder(DIR) end
+    if isfile and isfile(FILE) then
+        local data = HttpService:JSONDecode(readfile(FILE))
+        for k, v in pairs(data.cfg or {}) do if cfg[k] ~= nil then cfg[k] = v end end
+        for k, v in pairs(data.totals or {}) do if totals[k] ~= nil then totals[k] = v end end
+        wasFarming = data.wasFarming == true
+    end
+end)
+local lastSave = 0
+local function save(force)
+    if not writefile then return end
+    if not force and os.clock() - lastSave < 10 then return end
+    lastSave = os.clock()
+    pcall(function()
+        writefile(FILE, HttpService:JSONEncode({cfg = cfg, totals = totals, wasFarming = cfg.farm}))
+    end)
+end
+totals.sessions += 1
+
+-- ───────── session stats ─────────
+local session = {coins = 0, bags = {}, start = os.clock(), rate = 0}
+local status, statusColor = "Idle", Color3.fromRGB(150, 150, 160)
+local fps, ping = 60, 0
+local function setStatus(text, col)
+    status = text
+    statusColor = col or Color3.fromRGB(150, 150, 160)
+end
+local GREEN, AMBER, RED, GREY = Color3.fromRGB(120, 205, 140), Color3.fromRGB(235, 185, 80), Color3.fromRGB(235, 100, 100), Color3.fromRGB(150, 150, 160)
+
+local function fmt(n)
+    n = n or 0
+    if n >= 1e6 then return string.format("%.2fM", n / 1e6) end
+    if n >= 1e4 then return string.format("%.1fk", n / 1e3) end
+    return tostring(math.floor(n))
+end
+local function fmtTime(s)
+    s = math.floor(s)
+    return string.format("%02d:%02d:%02d", s // 3600, (s % 3600) // 60, s % 60)
+end
+
+-- ───────── helpers: game state ─────────
+local function chain(root, ...)
+    local cur = root
+    for _, name in ipairs({...}) do
+        if not cur then return nil end
+        cur = cur:FindFirstChild(name)
+    end
+    return cur
+end
+local function getChar()
+    local ch = LP.Character
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    if ch and hum and hrp and hum.Health > 0 then return ch, hum, hrp end
+end
+local function bagFull()
+    local n = chain(LP:FindFirstChild("PlayerGui"), "MainGUI", "Lobby", "Dock", "CoinBags", "FullBagNotification")
+    return n ~= nil and n.Visible == true
+end
+
+local container
+local lastScan = 0
+local function findContainer()
+    if container and container.Parent and container:IsDescendantOf(workspace) then return container end
+    if container then
+        container = nil
+        totals.rounds += 1
+        session.rounds = (session.rounds or 0) + 1
+    end
+    if os.clock() - lastScan < 1 then return nil end
+    lastScan = os.clock()
+    for _, inst in ipairs(workspace:GetDescendants()) do
+        if inst.Name == "CoinContainer" then
+            container = inst
+            return inst
+        end
+    end
+end
+
+local ignored = setmetatable({}, {__mode = "k"})
+local murdererPos, lastMurd = nil, 0
+local function updateMurderer()
+    if os.clock() - lastMurd < 0.3 then return end
+    lastMurd = os.clock()
+    murdererPos = nil
+    if not cfg.avoid then return end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP and p.Character then
+            local root = p.Character:FindFirstChild("HumanoidRootPart")
+            local bp = p:FindFirstChild("Backpack")
+            if root and (p.Character:FindFirstChild("Knife") or (bp and bp:FindFirstChild("Knife"))) then
+                murdererPos = root.Position
+                return
+            end
+        end
+    end
+end
+local function isCoin(obj)
+    if not obj:IsA("BasePart") or ignored[obj] then return false end
+    if obj.Name == "Coin_Server" then return true end
+    return obj:FindFirstChildWhichIsA("TouchTransmitter") ~= nil
+end
+local function pickCoin(origin)
+    local cont = findContainer()
+    if not cont then return nil end
+    updateMurderer()
+    local best, bestD = nil, cfg.maxDist
+    for _, obj in ipairs(cont:GetChildren()) do
+        if isCoin(obj) then
+            local d = (origin - obj.Position).Magnitude
+            if d < bestD and not (murdererPos and (murdererPos - obj.Position).Magnitude < 24) then
+                best, bestD = obj, d
+            end
+        end
+    end
+    return best
+end
+
+-- ───────── bag counters → stats ─────────
+local bagLast = {}
+local function pollBags()
+    local box = chain(LP:FindFirstChild("PlayerGui"), "MainGUI", "Game", "CoinBags", "Container")
+    if not box then return end
+    for _, bag in ipairs(box:GetChildren()) do
+        local label = bag:FindFirstChild("Coins", true)
+        if label and label:IsA("TextLabel") then
+            local v = tonumber((label.Text:gsub("[^%d]", ""))) or 0
+            local last = bagLast[bag.Name] or v
+            if v > last then
+                local d = v - last
+                session.coins += d
+                totals.coins += d
+                session.bags[bag.Name] = (session.bags[bag.Name] or 0) + d
+                totals.bags[bag.Name] = (totals.bags[bag.Name] or 0) + d
+            end
+            bagLast[bag.Name] = v
+        end
+    end
+end
+
+-- ───────── movement ─────────
+local noclipParts, noclipChar = {}, nil
+local function rebuildParts(ch)
+    noclipChar = ch
+    noclipParts = {}
+    for _, d in ipairs(ch:GetDescendants()) do
+        if d:IsA("BasePart") then noclipParts[#noclipParts + 1] = d end
+    end
+end
+local flying = false
+bind(RunService.Stepped, function()
+    if flying and LP.Character then
+        if noclipChar ~= LP.Character then rebuildParts(LP.Character) end
+        for i = 1, #noclipParts do
+            local p = noclipParts[i]
+            if p.CanCollide then p.CanCollide = false end
+        end
+    end
+end)
+local function prep(hum)
+    flying = true
+    if not hum.PlatformStand then hum.PlatformStand = true end
+end
+local function release()
+    if not flying then return end
+    flying = false
+    local ch, hum = getChar()
+    if hum then hum.PlatformStand = false end
+end
+local function touch(hrp, coin)
+    if firetouchinterest then
+        pcall(function()
+            firetouchinterest(hrp, coin, 0)
+            firetouchinterest(hrp, coin, 1)
+        end)
+    end
+end
+local ROT = CFrame.Angles(-math.pi / 2, 0, 0)
+local jitter, nextJitter = 1, 0
+local function collect(coin, hum, hrp)
+    prep(hum)
+    local started = os.clock()
+    local touched = false
+    while alive and cfg.farm and coin.Parent and hrp.Parent and os.clock() - started < 7 do
+        local target = coin.Position - Vector3.new(0, cfg.offset, 0)
+        local diff = target - hrp.Position
+        local dist = diff.Magnitude
+        local dt
+        if cfg.method == "Hop" then
+            local step = math.min(dist, cfg.hopDist)
+            hrp.CFrame = CFrame.new(hrp.Position + (dist > 0 and diff.Unit * step or Vector3.zero)) * ROT
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            if dist - step < 14 then touch(hrp, coin) end
+            touched = dist <= cfg.hopDist
+            task.wait(cfg.hopDelay * (cfg.humanize and (0.8 + math.random() * 0.5) or 1))
+        else
+            dt = RunService.Heartbeat:Wait()
+            if cfg.humanize and os.clock() > nextJitter then
+                jitter = 0.85 + math.random() * 0.3
+                nextJitter = os.clock() + 0.4
+                if math.random() < 0.03 then task.wait(0.12 + math.random() * 0.25) end
+            end
+            local step = cfg.speed * (cfg.humanize and jitter or 1) * dt
+            if dist <= step then
+                hrp.CFrame = CFrame.new(target) * ROT
+                touched = true
+            else
+                hrp.CFrame = CFrame.new(hrp.Position + diff.Unit * step) * ROT
+            end
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            if dist < 14 or touched then touch(hrp, coin) end
+        end
+        if touched then break end
+        if not getChar() then return end
+    end
+    if touched then
+        ignored[coin] = true
+        task.delay(2, function() ignored[coin] = nil end)
+    else
+        ignored[coin] = true
+        task.delay(5, function() ignored[coin] = nil end)
+    end
+end
+
+task.spawn(function()
+    while alive do
+        if not cfg.farm then
+            release()
+            setStatus("Idle", GREY)
+            task.wait(0.3)
+        else
+            local ch, hum, hrp = getChar()
+            if not ch then
+                release()
+                setStatus("Respawning", AMBER)
+                task.wait(0.4)
+            elseif bagFull() then
+                release()
+                if cfg.resetFull then
+                    setStatus("Bag full → reset", AMBER)
+                    hum.Health = 0
+                    task.wait(4)
+                else
+                    setStatus("Bag full", AMBER)
+                    task.wait(1)
+                end
+            elseif not findContainer() then
+                release()
+                setStatus("Waiting for round", GREY)
+                task.wait(0.5)
+            else
+                local coin = pickCoin(hrp.Position)
+                if not coin then
+                    setStatus("Searching coins", GREY)
+                    task.wait(0.15)
+                else
+                    setStatus("Farming", GREEN)
+                    pcall(collect, coin, hum, hrp)
+                end
+            end
+        end
+    end
+end)
+
+-- ───────── anti AFK / render / sampling ─────────
+bind(LP.Idled, function()
+    if not cfg.antiAfk then return end
+    pcall(function()
+        local vu = game:GetService("VirtualUser")
+        vu:CaptureController()
+        vu:ClickButton2(Vector2.new())
+    end)
+end)
+local acc, frames = 0, 0
+bind(RunService.RenderStepped, function(dt)
+    acc += dt
+    frames += 1
+    if acc >= 0.5 then
+        fps = frames / acc
+        acc, frames = 0, 0
+    end
+end)
+task.spawn(function()
+    while alive do
+        pcall(pollBags)
+        local el = os.clock() - session.start
+        session.rate = el > 20 and session.coins / el * 3600 or 0
+        if session.rate > totals.bestRate then totals.bestRate = session.rate end
+        pcall(function() ping = StatsService.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+        totals.seconds += 0.4
+        save()
+        task.wait(0.4)
+    end
+end)
+local function applyRender()
+    pcall(function() RunService:Set3dRenderingEnabled(not cfg.renderOff) end)
+end
+
+-- ───────── kick / disconnect → rejoin ─────────
+local rejoining = false
+local function queueReload()
+    local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+    if not q then return false end
+    local code
+    if SCRIPT_URL ~= "" then
+        code = 'loadstring(game:HttpGet("' .. SCRIPT_URL .. '?nocache=" .. os.time()))()'
+    elseif isfile and isfile("FlinFarm.lua") then
+        code = 'loadstring(readfile("FlinFarm.lua"))()'
+    end
+    if not code then return false end
+    pcall(q, code)
+    return true
+end
+local function rejoin(reason)
+    if rejoining or not cfg.autoRejoin then return end
+    rejoining = true
+    totals.kicks += 1
+    totals.rejoins += 1
+    totals.lastReason = tostring(reason or "disconnected"):sub(1, 60)
+    cfg.farm = cfg.farm
+    save(true)
+    setStatus("Rejoining…", AMBER)
+    task.spawn(function()
+        local attempt = 0
+        while alive do
+            attempt += 1
+            queueReload()
+            pcall(function() TeleportService:Teleport(game.PlaceId, LP) end)
+            task.wait(math.min(8 * attempt, 40))
+        end
+    end)
+end
+pcall(function()
+    local overlay = CoreGui:WaitForChild("RobloxPromptGui", 10):WaitForChild("promptOverlay", 10)
+    bind(overlay.ChildAdded, function(child)
+        if child.Name == "ErrorPrompt" then
+            task.wait(0.4)
+            local msg = "kicked"
+            pcall(function() msg = child.MessageArea.ErrorFrame.ErrorMessage.Text end)
+            rejoin(msg)
+        end
+    end)
+end)
+pcall(function()
+    bind(GuiService.ErrorMessageChanged, function(msg)
+        if msg and msg ~= "" then rejoin(msg) end
+    end)
+end)
+pcall(function()
+    bind(LP.OnTeleport, function(state)
+        if state == Enum.TeleportState.Started then queueReload() end
+    end)
+end)
+
+-- ───────── potato mode (no textures) + white screen ─────────
+local potatoDone = setmetatable({}, {__mode = "k"})
+local potatoConn, potatoQueue = nil, {}
+local function potatoObj(o)
+    if potatoDone[o] then return end
+    potatoDone[o] = true
+    if o:IsA("BasePart") then
+        o.Material = Enum.Material.SmoothPlastic
+        o.Reflectance = 0
+        o.CastShadow = false
+        if o:IsA("MeshPart") then
+            o.TextureID = ""
+            o.RenderFidelity = Enum.RenderFidelity.Performance
+        end
+    elseif o:IsA("SpecialMesh") then
+        o.TextureId = ""
+    elseif o:IsA("Decal") or o:IsA("Texture") then
+        o.Transparency = 1
+    elseif o:IsA("SurfaceAppearance") or o:IsA("Shirt") or o:IsA("Pants") or o:IsA("ShirtGraphic") then
+        o:Destroy()
+    elseif o:IsA("ParticleEmitter") or o:IsA("Trail") or o:IsA("Beam") or o:IsA("Fire") or o:IsA("Smoke") or o:IsA("Sparkles") or o:IsA("Explosion") then
+        o.Enabled = false
+    elseif o:IsA("PostEffect") then
+        o.Enabled = false
+    elseif o:IsA("Atmosphere") then
+        o.Density = 0
+        o.Haze = 0
+    end
+end
+local potatoRunId = 0
+local function applyPotato(on)
+    potatoRunId += 1
+    local myRun = potatoRunId
+    if potatoConn then
+        potatoConn:Disconnect()
+        potatoConn = nil
+    end
+    table.clear(potatoQueue)
+    if not on then return end
+    local Lighting = game:GetService("Lighting")
+    pcall(function()
+        Lighting.GlobalShadows = false
+        Lighting.FogEnd = 9e9
+        Lighting.EnvironmentDiffuseScale = 0
+        Lighting.EnvironmentSpecularScale = 0
+    end)
+    pcall(sethiddenproperty, Lighting, "Technology", Enum.Technology.Compatibility)
+    pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+    pcall(function() if setfpscap then setfpscap(0) end end)
+    local terrain = workspace:FindFirstChildOfClass("Terrain")
+    if terrain then
+        pcall(function()
+            terrain.WaterWaveSize = 0
+            terrain.WaterWaveSpeed = 0
+            terrain.WaterReflectance = 0
+            terrain.WaterTransparency = 1
+        end)
+        pcall(sethiddenproperty, terrain, "Decoration", false)
+    end
+    potatoConn = workspace.DescendantAdded:Connect(function(o) potatoQueue[#potatoQueue + 1] = o end)
+    task.spawn(function()
+        local n = 0
+        for _, root in ipairs({Lighting, workspace}) do
+            for _, o in ipairs(root:GetDescendants()) do
+                if myRun ~= potatoRunId or not alive then return end
+                pcall(potatoObj, o)
+                n += 1
+                if n % 250 == 0 then task.wait() end
+            end
+        end
+        while alive and myRun == potatoRunId do
+            for _ = 1, math.min(#potatoQueue, 120) do
+                local o = table.remove(potatoQueue)
+                if o and o.Parent then pcall(potatoObj, o) end
+            end
+            task.wait(0.15)
+        end
+    end)
+end
+
+local whiteGui = Instance.new("ScreenGui")
+whiteGui.Name = "FlinFarmWhite"
+whiteGui.ResetOnSpawn = false
+whiteGui.IgnoreGuiInset = true
+whiteGui.DisplayOrder = 900
+whiteGui.Enabled = false
+whiteGui.Parent = gethui and gethui() or CoreGui
+local whiteFrame = Instance.new("Frame")
+whiteFrame.Size = UDim2.fromScale(1, 1)
+whiteFrame.BackgroundColor3 = Color3.new(1, 1, 1)
+whiteFrame.BorderSizePixel = 0
+whiteFrame.Parent = whiteGui
+local whiteInfo = Instance.new("TextLabel")
+whiteInfo.BackgroundTransparency = 1
+whiteInfo.AnchorPoint = Vector2.new(0.5, 0.5)
+whiteInfo.Position = UDim2.fromScale(0.5, 0.5)
+whiteInfo.Size = UDim2.fromOffset(500, 120)
+whiteInfo.FontFace = Font.fromEnum(Enum.Font.FredokaOne)
+whiteInfo.TextSize = 30
+whiteInfo.TextColor3 = Color3.fromRGB(40, 40, 46)
+whiteInfo.Text = "FlinFarm"
+whiteInfo.Parent = whiteFrame
+local function applyWhite()
+    whiteGui.Enabled = cfg.whiteScreen
+end
+
+-- ───────── UI ─────────
+local C = {
+    bg = Color3.fromRGB(24, 24, 27), panel = Color3.fromRGB(30, 30, 34), elem = Color3.fromRGB(38, 38, 43),
+    border = Color3.fromRGB(82, 82, 92), text = Color3.fromRGB(238, 238, 242), sub = Color3.fromRGB(150, 150, 160),
+    accent = Color3.fromRGB(225, 225, 232),
+}
+local FONT = Font.fromEnum(Enum.Font.FredokaOne)
+local LOGO_B64 = "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"
+
+local function b64(data)
+    for _, fn in ipairs({crypt and crypt.base64decode, crypt and crypt.base64 and crypt.base64.decode, base64_decode, base64 and (base64.decode or base64.Decode)}) do
+        local ok, res = pcall(fn, data)
+        if ok and type(res) == "string" and #res > 100 then return res end
+    end
+    local al = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    local map = {}
+    for i = 1, 64 do map[al:sub(i, i)] = i - 1 end
+    local out, buf, bits = {}, 0, 0
+    for ch in data:gmatch("[%w%+/]") do
+        buf = buf * 64 + map[ch]
+        bits += 6
+        if bits >= 8 then
+            bits -= 8
+            local byte = math.floor(buf / 2 ^ bits)
+            buf -= byte * 2 ^ bits
+            out[#out + 1] = string.char(byte)
+        end
+    end
+    return table.concat(out)
+end
+local logo = "rbxasset://textures/ui/GuiImagePlaceholder.png"
+pcall(function()
+    if writefile and getcustomasset then
+        local path = DIR .. "/logo.png"
+        if not (isfile and isfile(path)) then writefile(path, b64(LOGO_B64)) end
+        logo = getcustomasset(path)
+    end
+end)
+
+local function New(class, props, parent)
+    local i = Instance.new(class)
+    for k, v in pairs(props) do i[k] = v end
+    if parent then i.Parent = parent end
+    return i
+end
+local function round(i, r) return New("UICorner", {CornerRadius = UDim.new(0, r)}, i) end
+local function outline(i, t, col) return New("UIStroke", {Thickness = t or 1.5, Color = col or C.border, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, i) end
+local function text(parent, str, size, col, pos, sz, align)
+    return New("TextLabel", {
+        BackgroundTransparency = 1, Text = str, FontFace = FONT, TextSize = size, TextColor3 = col or C.text,
+        Position = pos or UDim2.new(), Size = sz or UDim2.new(1, 0, 1, 0),
+        TextXAlignment = align or Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+    }, parent)
+end
+
+local gui = New("ScreenGui", {Name = "FlinFarm", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 999}, gethui and gethui() or CoreGui)
+local main = New("Frame", {
+    Size = UDim2.fromOffset(580, 390), Position = UDim2.new(0.5, -290, 0.5, -195),
+    BackgroundColor3 = C.bg, BorderSizePixel = 0,
+}, gui)
+round(main, 18)
+outline(main, 2)
+
+-- header
+local header = New("Frame", {Size = UDim2.new(1, 0, 0, 64), BackgroundTransparency = 1}, main)
+local av = New("ImageLabel", {Size = UDim2.fromOffset(46, 46), Position = UDim2.fromOffset(14, 9), BackgroundTransparency = 1, Image = logo}, header)
+round(av, 23)
+outline(av, 1.5)
+text(header, "FlinFarm", 24, C.text, UDim2.fromOffset(70, 8), UDim2.new(1, -200, 0, 28))
+text(header, "auto farm · full stats · auto rejoin", 13, C.sub, UDim2.fromOffset(70, 36), UDim2.new(1, -200, 0, 18))
+local function hbtn(label, xoff)
+    local b = New("TextButton", {
+        Text = label, FontFace = FONT, TextSize = 18, TextColor3 = C.text, BackgroundColor3 = C.elem, AutoButtonColor = false,
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, xoff, 0, 18), Size = UDim2.fromOffset(28, 28),
+    }, header)
+    round(b, 14)
+    local s = outline(b, 1.5)
+    b.MouseEnter:Connect(function() s.Color = C.accent end)
+    b.MouseLeave:Connect(function() s.Color = C.border end)
+    return b
+end
+local minB, closeB = hbtn("-", -48), hbtn("X", -14)
+New("Frame", {Size = UDim2.new(1, -28, 0, 1), Position = UDim2.fromOffset(14, 64), BackgroundColor3 = C.border, BorderSizePixel = 0}, main)
+
+-- drag
+do
+    local dragging, start, startPos
+    bind(header.InputBegan, function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging, start, startPos = true, i.Position, main.Position
+        end
+    end)
+    bind(UIS.InputChanged, function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - start
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    bind(UIS.InputEnded, function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
+    end)
+end
+
+-- tabs
+local pages, tabBtns = {}, {}
+local function showPage(name)
+    for n, p in pairs(pages) do p.Visible = n == name end
+    for n, b in pairs(tabBtns) do
+        b.BackgroundColor3 = n == name and C.elem or C.bg
+        b.TextColor3 = n == name and C.text or C.sub
+    end
+end
+local tabBar = New("Frame", {Size = UDim2.new(1, -28, 0, 34), Position = UDim2.fromOffset(14, 74), BackgroundTransparency = 1}, main)
+New("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8)}, tabBar)
+for _, name in ipairs({"Farm", "Stats", "Safety"}) do
+    local b = New("TextButton", {
+        Text = name, FontFace = FONT, TextSize = 17, AutoButtonColor = false, Size = UDim2.fromOffset(100, 32),
+        BackgroundColor3 = C.bg, TextColor3 = C.sub,
+    }, tabBar)
+    round(b, 16)
+    outline(b, 1.5)
+    tabBtns[name] = b
+    local pg = New("Frame", {Size = UDim2.new(1, -28, 1, -122), Position = UDim2.fromOffset(14, 114), BackgroundTransparency = 1, Visible = false}, main)
+    pages[name] = pg
+    b.MouseButton1Click:Connect(function() showPage(name) end)
+end
+
+local function card(parent, title, pos, size)
+    local f = New("Frame", {Position = pos, Size = size, BackgroundColor3 = C.panel, BorderSizePixel = 0}, parent)
+    round(f, 14)
+    outline(f, 1.5)
+    if title then text(f, title, 15, C.sub, UDim2.fromOffset(14, 8), UDim2.new(1, -28, 0, 18)) end
+    return f
+end
+
+local setters = {}
+local function toggleRow(parent, y, label, key, onChange)
+    local row = New("Frame", {Position = UDim2.fromOffset(12, y), Size = UDim2.new(1, -24, 0, 30), BackgroundTransparency = 1}, parent)
+    text(row, label, 16, C.text, UDim2.new(), UDim2.new(1, -56, 1, 0))
+    local sw = New("TextButton", {Text = "", AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.fromOffset(44, 22), BackgroundColor3 = C.elem}, row)
+    round(sw, 11)
+    local st = outline(sw, 1.5)
+    local knob = New("Frame", {Size = UDim2.fromOffset(16, 16), Position = UDim2.fromOffset(3, 3), BackgroundColor3 = C.sub, BorderSizePixel = 0}, sw)
+    round(knob, 8)
+    local function render()
+        local on = cfg[key]
+        TweenService:Create(knob, TweenInfo.new(0.12), {Position = on and UDim2.fromOffset(25, 3) or UDim2.fromOffset(3, 3), BackgroundColor3 = on and C.text or C.sub}):Play()
+        st.Color = on and C.accent or C.border
+        sw.BackgroundColor3 = on and Color3.fromRGB(70, 70, 78) or C.elem
+    end
+    render()
+    sw.MouseButton1Click:Connect(function()
+        cfg[key] = not cfg[key]
+        render()
+        if onChange then onChange(cfg[key]) end
+        save(true)
+    end)
+    setters[#setters + 1] = render
+end
+local function sliderRow(parent, y, label, key, min, max, suffix)
+    local row = New("Frame", {Position = UDim2.fromOffset(12, y), Size = UDim2.new(1, -24, 0, 44), BackgroundTransparency = 1}, parent)
+    text(row, label, 16, C.text, UDim2.new(), UDim2.new(0.6, 0, 0, 20))
+    local val = text(row, "", 16, C.accent, UDim2.new(0.6, 0, 0, 0), UDim2.new(0.4, 0, 0, 20), Enum.TextXAlignment.Right)
+    local track = New("TextButton", {Text = "", AutoButtonColor = false, Position = UDim2.fromOffset(0, 28), Size = UDim2.new(1, 0, 0, 10), BackgroundColor3 = C.elem}, row)
+    round(track, 5)
+    outline(track, 1)
+    local fill = New("Frame", {Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = C.accent, BorderSizePixel = 0}, track)
+    round(fill, 5)
+    local function render()
+        local a = math.clamp((cfg[key] - min) / (max - min), 0, 1)
+        fill.Size = UDim2.new(a, 0, 1, 0)
+        val.Text = tostring(math.floor(cfg[key] * 100 + 0.5) / 100) .. (suffix or "")
+    end
+    render()
+    local dragging = false
+    local function setFrom(x)
+        local a = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+        cfg[key] = math.floor(min + (max - min) * a + 0.5)
+        render()
+    end
+    track.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            setFrom(i.Position.X)
+        end
+    end)
+    bind(UIS.InputChanged, function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then setFrom(i.Position.X) end
+    end)
+    bind(UIS.InputEnded, function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            save(true)
+        end
+    end)
+    setters[#setters + 1] = render
+end
+
+-- Farm page
+local farmPg = pages.Farm
+local statsCard = card(farmPg, "Live stats", UDim2.new(), UDim2.new(0.5, -7, 1, 0))
+local live = {}
+do
+    local defs = {{"Session", "coins"}, {"Per hour", "rate"}, {"All-time", "total"}, {"Status", "status"}}
+    for i, d in ipairs(defs) do
+        local col, rowi = (i - 1) % 2, (i - 1) // 2
+        local box = New("Frame", {Position = UDim2.new(0, 12 + col * ((1 - 24 / 1) * 0), 0, 36 + rowi * 108), Size = UDim2.new(0.5, -18, 0, 98), BackgroundColor3 = C.elem, BorderSizePixel = 0}, statsCard)
+        box.Position = UDim2.new(col * 0.5, col == 0 and 12 or 6, 0, 36 + rowi * 108)
+        round(box, 12)
+        outline(box, 1)
+        text(box, d[1], 14, C.sub, UDim2.fromOffset(10, 8), UDim2.new(1, -20, 0, 16))
+        live[d[2]] = text(box, "0", 26, C.text, UDim2.fromOffset(10, 34), UDim2.new(1, -20, 0, 40))
+    end
+end
+local ctlCard = card(farmPg, "Farm", UDim2.new(0.5, 7, 0, 0), UDim2.new(0.5, -7, 1, 0))
+toggleRow(ctlCard, 32, "Auto Farm", "farm", function(on)
+    if not on then release() end
+end)
+do
+    local row = New("Frame", {Position = UDim2.fromOffset(12, 66), Size = UDim2.new(1, -24, 0, 30), BackgroundTransparency = 1}, ctlCard)
+    text(row, "Method", 16, C.text, UDim2.new(), UDim2.new(0.5, 0, 1, 0))
+    local mb = New("TextButton", {
+        Text = cfg.method, FontFace = FONT, TextSize = 16, TextColor3 = C.text, BackgroundColor3 = C.elem, AutoButtonColor = false,
+        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.fromOffset(100, 26),
+    }, row)
+    round(mb, 13)
+    outline(mb, 1.5)
+    mb.MouseButton1Click:Connect(function()
+        cfg.method = cfg.method == "Glide" and "Hop" or "Glide"
+        mb.Text = cfg.method
+        save(true)
+    end)
+end
+sliderRow(ctlCard, 100, "Speed (studs/s)", "speed", 20, 300)
+toggleRow(ctlCard, 150, "Avoid murderer", "avoid")
+toggleRow(ctlCard, 184, "Reset on full bag", "resetFull")
+toggleRow(ctlCard, 218, "Humanize movement", "humanize")
+
+-- Stats page
+local statsPg = pages.Stats
+local big = card(statsPg, nil, UDim2.new(), UDim2.new(1, 0, 1, 0))
+local scroll = New("ScrollingFrame", {
+    Size = UDim2.new(1, -16, 1, -16), Position = UDim2.fromOffset(8, 8), BackgroundTransparency = 1, BorderSizePixel = 0,
+    ScrollBarThickness = 3, ScrollBarImageColor3 = C.border, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+}, big)
+New("UIListLayout", {Padding = UDim.new(0, 4)}, scroll)
+local rows = {}
+local function statRow(key, label)
+    local r = New("Frame", {Size = UDim2.new(1, -10, 0, 26), BackgroundTransparency = 1}, scroll)
+    text(r, label, 16, C.sub, UDim2.new(), UDim2.new(0.5, 0, 1, 0))
+    rows[key] = text(r, "-", 16, C.text, UDim2.new(0.5, 0, 0, 0), UDim2.new(0.5, 0, 1, 0), Enum.TextXAlignment.Right)
+end
+for _, d in ipairs({
+    {"uptime", "Session time"}, {"coins", "Session collected"}, {"bags", "By type"}, {"rate", "Per hour"}, {"day", "Projected per day"},
+    {"best", "Best rate"}, {"rounds", "Rounds this session"}, {"avg", "Avg per round"}, {"total", "All-time collected"},
+    {"alltime", "All-time farm time"}, {"sessions", "Sessions started"}, {"kicks", "Kicks / disconnects"},
+    {"rejoins", "Auto rejoins"}, {"reason", "Last disconnect"}, {"ping", "Ping"}, {"fps", "FPS"},
+}) do statRow(d[1], d[2]) end
+
+-- Safety page
+local safePg = pages.Safety
+local sc = card(safePg, "Protection", UDim2.new(), UDim2.new(0.5, -7, 1, 0))
+toggleRow(sc, 32, "Auto rejoin on kick", "autoRejoin")
+toggleRow(sc, 66, "Anti AFK", "antiAfk")
+toggleRow(sc, 100, "Resume farm after rejoin", "autoStart")
+toggleRow(sc, 134, "3D render off (AFK, +FPS)", "renderOff", applyRender)
+toggleRow(sc, 168, "Potato mode (no textures)", "potato", applyPotato)
+toggleRow(sc, 202, "White screen", "whiteScreen", applyWhite)
+local tips = card(safePg, "Tuning", UDim2.new(0.5, 7, 0, 0), UDim2.new(0.5, -7, 1, 0))
+sliderRow(tips, 32, "Underground depth", "offset", 1, 12)
+sliderRow(tips, 84, "Hop distance", "hopDist", 8, 60)
+sliderRow(tips, 136, "Max coin distance", "maxDist", 100, 1500)
+local warn = text(tips, "Faster = higher kick risk. If you get kicked, lower the speed by ~20%. The script reconnects on its own.", 13, C.sub, UDim2.fromOffset(12, 190), UDim2.new(1, -24, 0, 70))
+warn.TextWrapped = true
+warn.TextYAlignment = Enum.TextYAlignment.Top
+warn.TextTruncate = Enum.TextTruncate.None
+
+showPage("Farm")
+
+-- pill
+local pillGui = New("ScreenGui", {Name = "FlinFarmPill", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 1000}, gethui and gethui() or CoreGui)
+local pill = New("TextButton", {
+    Text = "", AutoButtonColor = false, Visible = false, BackgroundColor3 = C.bg,
+    Size = UDim2.fromOffset(190, 44), Position = UDim2.new(0.5, -95, 0, 14),
+}, pillGui)
+round(pill, 22)
+outline(pill, 2)
+local pav = New("ImageLabel", {Size = UDim2.fromOffset(34, 34), Position = UDim2.fromOffset(6, 5), BackgroundTransparency = 1, Image = logo}, pill)
+round(pav, 17)
+text(pill, "FlinFarm", 19, C.text, UDim2.fromOffset(48, 0), UDim2.new(1, -56, 0.55, 0))
+local pillSub = text(pill, "", 13, C.sub, UDim2.fromOffset(48, 22), UDim2.new(1, -56, 0, 18))
+do
+    local dragging, moved, start, startPos
+    bind(pill.InputBegan, function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging, moved, start, startPos = true, false, i.Position, pill.Position
+        end
+    end)
+    bind(UIS.InputChanged, function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - start
+            if d.Magnitude > 5 then moved = true end
+            if moved then pill.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y) end
+        end
+    end)
+    bind(UIS.InputEnded, function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            if not moved then
+                pill.Visible = false
+                main.Visible = true
+            end
+        end
+    end)
+end
+minB.MouseButton1Click:Connect(function()
+    main.Visible = false
+    pill.Visible = true
+end)
+closeB.MouseButton1Click:Connect(function()
+    main.Visible = false
+    pill.Visible = false
+end)
+bind(UIS.InputBegan, function(i, gp)
+    if not gp and i.KeyCode == Enum.KeyCode.G then
+        pill.Visible = false
+        main.Visible = not main.Visible
+    end
+end)
+
+-- UI refresh (1 Hz when hidden is skipped)
+task.spawn(function()
+    while alive do
+        local el = os.clock() - session.start
+        local visible = main.Visible
+        if cfg.whiteScreen then whiteInfo.Text = "FlinFarm  ·  " .. status .. "\n" .. fmt(session.coins) .. " collected  ·  " .. fmt(session.rate) .. "/h" end
+        if pill.Visible then pillSub.Text = fmt(session.coins) .. " · " .. status end
+        if visible then
+            live.coins.Text = fmt(session.coins)
+            live.rate.Text = fmt(session.rate)
+            live.total.Text = fmt(totals.coins)
+            live.status.Text = status
+            live.status.TextColor3 = statusColor
+            live.status.TextSize = #status > 12 and 18 or 26
+            if pages.Stats.Visible then
+                rows.uptime.Text = fmtTime(el)
+                rows.coins.Text = fmt(session.coins)
+                local parts = {}
+                for name, v in pairs(session.bags) do parts[#parts + 1] = name .. " " .. fmt(v) end
+                rows.bags.Text = #parts > 0 and table.concat(parts, " · ") or "-"
+                rows.rate.Text = fmt(session.rate) .. "/h"
+                rows.day.Text = fmt(session.rate * 24)
+                rows.best.Text = fmt(totals.bestRate) .. "/h"
+                rows.rounds.Text = tostring(session.rounds or 0)
+                rows.avg.Text = (session.rounds or 0) > 0 and fmt(session.coins / session.rounds) or "-"
+                rows.total.Text = fmt(totals.coins)
+                rows.alltime.Text = fmtTime(totals.seconds)
+                rows.sessions.Text = tostring(totals.sessions)
+                rows.kicks.Text = tostring(totals.kicks)
+                rows.rejoins.Text = tostring(totals.rejoins)
+                rows.reason.Text = totals.lastReason
+                rows.ping.Text = string.format("%d ms", ping)
+                rows.fps.Text = string.format("%d", fps)
+            end
+        end
+        task.wait(1)
+    end
+end)
+
+-- cleanup + autostart
+getgenv().FlinFarmCleanup = function()
+    alive = false
+    cfg.farm = false
+    pcall(function() RunService:Set3dRenderingEnabled(true) end)
+    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    pcall(function() gui:Destroy() end)
+    pcall(function() pillGui:Destroy() end)
+    pcall(function() whiteGui:Destroy() end)
+    potatoRunId += 1
+end
+applyRender()
+applyWhite()
+if cfg.potato then applyPotato(true) end
+if cfg.autoStart and wasFarming then
+    task.delay(4, function()
+        cfg.farm = true
+        for _, r in ipairs(setters) do pcall(r) end
+    end)
+end
