@@ -341,19 +341,28 @@ end
 
 -- ───────── kick / disconnect → rejoin ─────────
 local rejoining = false
-local function queueReload()
+local queued = false
+local function rejoinReady()
+    local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+    local url = SCRIPT_URL ~= "" and SCRIPT_URL or tostring(cfg.url or "")
+    return q ~= nil and (url ~= "" or (isfile ~= nil and isfile("FlinFarm.lua")))
+end
+-- queue the relaunch ONCE per run (so retries never stack copies); re-called after the URL changes
+local function queueReload(force)
+    if queued and not force then return true end
     local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
     if not q then return false end
-    local code
     local url = SCRIPT_URL ~= "" and SCRIPT_URL or tostring(cfg.url or "")
+    local code
     if url ~= "" then
-        code = 'loadstring(game:HttpGet("' .. url .. '?nocache=" .. os.time()))()'
+        code = 'repeat task.wait() until game:IsLoaded() task.wait(1) local ok, err = pcall(function() loadstring(game:HttpGet("' .. url .. '"))() end) if not ok then warn("[FlinFarm] relaunch failed: " .. tostring(err)) end'
     elseif isfile and isfile("FlinFarm.lua") then
-        code = 'loadstring(readfile("FlinFarm.lua"))()'
+        code = 'repeat task.wait() until game:IsLoaded() task.wait(1) loadstring(readfile("FlinFarm.lua"))()'
     end
     if not code then return false end
-    pcall(q, code)
-    return true
+    local ok = pcall(q, code)
+    queued = ok
+    return ok
 end
 local function rejoin(reason)
     if rejoining or not cfg.autoRejoin then return end
@@ -394,11 +403,8 @@ pcall(function()
         if msg and msg ~= "" then rejoin(msg) end
     end)
 end)
-pcall(function()
-    bind(LP.OnTeleport, function(state)
-        if state == Enum.TeleportState.Started then queueReload() end
-    end)
-end)
+queueReload()
+if not rejoinReady() then warn("[FlinFarm] auto-restart after rejoin is NOT ready: set Script URL in the Safety tab") end
 
 -- ───────── potato mode (no textures) + white screen ─────────
 local potatoDone = setmetatable({}, {__mode = "k"})
@@ -575,7 +581,7 @@ local av = New("ImageLabel", {Size = UDim2.fromOffset(46, 46), Position = UDim2.
 round(av, 23)
 outline(av, 1.5)
 text(header, "FlinFarm", 24, C.text, UDim2.fromOffset(70, 8), UDim2.new(1, -200, 0, 28))
-text(header, "auto farm · full stats · auto rejoin", 13, C.sub, UDim2.fromOffset(70, 36), UDim2.new(1, -200, 0, 18))
+local subtitle = text(header, "auto farm · full stats · auto rejoin", 13, C.sub, UDim2.fromOffset(70, 36), UDim2.new(1, -200, 0, 18))
 local function hbtn(label, xoff)
     local b = New("TextButton", {
         Text = label, FontFace = FONT, TextSize = 18, TextColor3 = C.text, BackgroundColor3 = C.elem, AutoButtonColor = false,
@@ -790,11 +796,12 @@ outline(urlBox, 1)
 urlBox.FocusLost:Connect(function()
     cfg.url = urlBox.Text:gsub("%s", "")
     save(true)
+    queueReload(true)
 end)
-local warn = text(tips, "Rejoin-ready: " .. ((SCRIPT_URL ~= "" or cfg.url ~= "") and "yes" or "NO - paste the URL above") .. ". Faster = higher kick risk; speed drops 25% after each kick.", 13, C.sub, UDim2.fromOffset(12, 216), UDim2.new(1, -24, 0, 44))
-warn.TextWrapped = true
-warn.TextYAlignment = Enum.TextYAlignment.Top
-warn.TextTruncate = Enum.TextTruncate.None
+local hint = text(tips, "Rejoin-ready: " .. ((SCRIPT_URL ~= "" or cfg.url ~= "") and "yes" or "NO - paste the URL above") .. ". Faster = higher kick risk; speed drops 25% after each kick.", 13, C.sub, UDim2.fromOffset(12, 216), UDim2.new(1, -24, 0, 44))
+hint.TextWrapped = true
+hint.TextYAlignment = Enum.TextYAlignment.Top
+hint.TextTruncate = Enum.TextTruncate.None
 
 showPage("Farm")
 
@@ -854,6 +861,13 @@ task.spawn(function()
     while alive do
         local el = os.clock() - session.start
         local visible = main.Visible
+        if rejoinReady() then
+            subtitle.Text = "auto farm · full stats · auto rejoin ready"
+            subtitle.TextColor3 = C.sub
+        else
+            subtitle.Text = "! paste Script URL in Safety for auto-restart"
+            subtitle.TextColor3 = RED
+        end
         if cfg.whiteScreen then whiteInfo.Text = "FlinFarm  ·  " .. status .. "\n" .. fmt(session.coins) .. " collected  ·  " .. fmt(session.rate) .. "/h" end
         if pill.Visible then pillSub.Text = fmt(session.coins) .. " · " .. status end
         if visible then
