@@ -6,7 +6,7 @@ FlinFarm — отдельный автофарм для MM2 (монеты / ко
 Автореджоин после кика сам перезапускает скрипт на новом сервере. Для этого вставь
 RAW-ссылку на этот файл в SCRIPT_URL (Pastebin). Без ссылки скрипт попробует FlinFarm.lua из workspace.
 ]]
-local SCRIPT_URL = "https://raw.githubusercontent.com/MaxFOG120/FL/refs/heads/main/Desig"
+local SCRIPT_URL = "https://raw.githubusercontent.com/SakuraHubX/FarM/refs/heads/main/FARM"
 
 -- ───────── cleanup of previous run ─────────
 if getgenv and getgenv().FlinFarmCleanup then pcall(getgenv().FlinFarmCleanup) end
@@ -33,7 +33,7 @@ end
 -- ───────── saved data ─────────
 local DIR, FILE = "FlinFarm", "FlinFarm/data.json"
 local cfg = {
-    farm = false, method = "Glide", speed = 90, hopDist = 24, hopDelay = 0.12,
+    farm = false, method = "Glide", speed = 24, touchRadius = 8, fullAction = "Fling murderer", hopDist = 24, hopDelay = 0.12,
     avoid = true, resetFull = true, humanize = true,
     autoRejoin = true, antiAfk = true, autoStart = true, renderOff = false, potato = false, whiteScreen = false, adaptive = true, url = "",
     offset = 4, maxDist = 600,
@@ -47,6 +47,8 @@ pcall(function()
         for k, v in pairs(data.cfg or {}) do if cfg[k] ~= nil then cfg[k] = v end end
         for k, v in pairs(data.totals or {}) do if totals[k] ~= nil then totals[k] = v end end
         wasFarming = data.wasFarming == true
+        if data.ver ~= 2 then cfg.speed = 24 end
+        cfg.speed = math.clamp(cfg.speed, 10, 60)
     end
 end)
 local lastSave = 0
@@ -55,7 +57,7 @@ local function save(force)
     if not force and os.clock() - lastSave < 10 then return end
     lastSave = os.clock()
     pcall(function()
-        writefile(FILE, HttpService:JSONEncode({cfg = cfg, totals = totals, wasFarming = cfg.farm}))
+        writefile(FILE, HttpService:JSONEncode({ver = 2, cfg = cfg, totals = totals, wasFarming = cfg.farm}))
     end)
 end
 totals.sessions += 1
@@ -219,6 +221,58 @@ local function touch(hrp, coin)
     end
 end
 local ROT = CFrame.Angles(-math.pi / 2, 0, 0)
+local touchedAt = setmetatable({}, {__mode = "k"})
+local function touchNear(hrp)
+    local cont = container
+    if not cont or not cont.Parent then return end
+    local now, r = os.clock(), cfg.touchRadius
+    local pos = hrp.Position
+    for _, o in ipairs(cont:GetChildren()) do
+        if o:IsA("BasePart") and (pos - o.Position).Magnitude <= r and (not touchedAt[o] or now - touchedAt[o] > 0.35) and isCoin(o) then
+            touchedAt[o] = now
+            touch(hrp, o)
+        end
+    end
+end
+local function findMurderer()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP and p.Character then
+            local bp = p:FindFirstChild("Backpack")
+            if p.Character:FindFirstChild("Knife") or (bp and bp:FindFirstChild("Knife")) then return p end
+        end
+    end
+end
+local function flingMurderer()
+    local p = findMurderer()
+    local ch, hum, hrp = getChar()
+    if not (p and ch) then return false end
+    local tRoot = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+    if not tRoot then return false end
+    local home = hrp.CFrame
+    local startPos = tRoot.Position
+    flying = false
+    hum.PlatformStand = true
+    local t0 = os.clock()
+    while alive and cfg.farm and os.clock() - t0 < 3.5 do
+        local c2, h2, r2 = getChar()
+        tRoot = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+        if not (c2 and tRoot) then break end
+        if (tRoot.Position - startPos).Magnitude > 140 or tRoot.Position.Y < -200 then break end
+        r2.CanCollide = true
+        r2.CFrame = tRoot.CFrame * CFrame.new((math.random() - 0.5) * 1.2, 0, (math.random() - 0.5) * 1.2)
+        r2.AssemblyAngularVelocity = Vector3.new(0, 3e4, 0)
+        r2.AssemblyLinearVelocity = Vector3.zero
+        RunService.Heartbeat:Wait()
+    end
+    local c3, h3, r3 = getChar()
+    if r3 then
+        r3.AssemblyAngularVelocity = Vector3.zero
+        r3.AssemblyLinearVelocity = Vector3.zero
+        r3.CFrame = home
+        h3.PlatformStand = false
+    end
+    return true
+end
 local jitter, nextJitter = 1, 0
 local function collect(coin, hum, hrp)
     prep(hum)
@@ -233,7 +287,8 @@ local function collect(coin, hum, hrp)
             local step = math.min(dist, cfg.hopDist)
             hrp.CFrame = CFrame.new(hrp.Position + (dist > 0 and diff.Unit * step or Vector3.zero)) * ROT
             hrp.AssemblyLinearVelocity = Vector3.zero
-            if dist - step < 14 then touch(hrp, coin) end
+            touchNear(hrp)
+            if dist - step < cfg.touchRadius then touch(hrp, coin) end
             touched = dist <= cfg.hopDist
             task.wait(cfg.hopDelay * (cfg.humanize and (0.8 + math.random() * 0.5) or 1))
         else
@@ -251,7 +306,8 @@ local function collect(coin, hum, hrp)
                 hrp.CFrame = CFrame.new(hrp.Position + diff.Unit * step) * ROT
             end
             hrp.AssemblyLinearVelocity = Vector3.zero
-            if dist < 14 or touched then touch(hrp, coin) end
+            touchNear(hrp)
+            if dist < cfg.touchRadius or touched then touch(hrp, coin) end
         end
         if touched then break end
         if not getChar() then return end
@@ -279,7 +335,22 @@ task.spawn(function()
                 task.wait(0.4)
             elseif bagFull() then
                 release()
-                if cfg.resetFull then
+                local act = cfg.fullAction
+                if act == "Fling murderer" then
+                    setStatus("Bag full → fling murderer", AMBER)
+                    pcall(flingMurderer)
+                    setStatus("Waiting for round end", AMBER)
+                    local t0 = os.clock()
+                    while alive and cfg.farm and findContainer() and bagFull() and os.clock() - t0 < 25 do
+                        task.wait(0.5)
+                    end
+                    local c4, h4 = getChar()
+                    if h4 and findContainer() and bagFull() then
+                        setStatus("Bag full → reset", AMBER)
+                        h4.Health = 0
+                        task.wait(4)
+                    end
+                elseif act == "Reset" then
                     setStatus("Bag full → reset", AMBER)
                     hum.Health = 0
                     task.wait(4)
@@ -372,7 +443,7 @@ local function rejoin(reason)
     totals.lastReason = tostring(reason or "disconnected"):sub(1, 60)
     if cfg.adaptive and status == "Farming" and cfg.farm then
         local old = cfg.speed
-        cfg.speed = math.max(40, math.floor(cfg.speed * 0.75))
+        cfg.speed = math.max(10, math.floor(cfg.speed * 0.75))
         totals.lastReason = totals.lastReason .. " (speed " .. old .. "→" .. cfg.speed .. ")"
     end
     save(true)
@@ -727,28 +798,30 @@ do
     end
 end
 local ctlCard = card(farmPg, "Farm", UDim2.new(0.5, 7, 0, 0), UDim2.new(0.5, -7, 1, 0))
-toggleRow(ctlCard, 32, "Auto Farm", "farm", function(on)
+toggleRow(ctlCard, 30, "Auto Farm", "farm", function(on)
     if not on then release() end
 end)
-do
-    local row = New("Frame", {Position = UDim2.fromOffset(12, 66), Size = UDim2.new(1, -24, 0, 30), BackgroundTransparency = 1}, ctlCard)
-    text(row, "Method", 16, C.text, UDim2.new(), UDim2.new(0.5, 0, 1, 0))
+local function cycleRow(parent, y, label, key, options)
+    local row = New("Frame", {Position = UDim2.fromOffset(12, y), Size = UDim2.new(1, -24, 0, 30), BackgroundTransparency = 1}, parent)
+    text(row, label, 16, C.text, UDim2.new(), UDim2.new(0.4, 0, 1, 0))
     local mb = New("TextButton", {
-        Text = cfg.method, FontFace = FONT, TextSize = 16, TextColor3 = C.text, BackgroundColor3 = C.elem, AutoButtonColor = false,
-        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.fromOffset(100, 26),
+        Text = cfg[key], FontFace = FONT, TextSize = 14, TextColor3 = C.text, BackgroundColor3 = C.elem, AutoButtonColor = false,
+        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.new(0.6, 0, 0, 26),
     }, row)
     round(mb, 13)
     outline(mb, 1.5)
     mb.MouseButton1Click:Connect(function()
-        cfg.method = cfg.method == "Glide" and "Hop" or "Glide"
-        mb.Text = cfg.method
+        local idx = table.find(options, cfg[key]) or 0
+        cfg[key] = options[idx % #options + 1]
+        mb.Text = cfg[key]
         save(true)
     end)
 end
-sliderRow(ctlCard, 100, "Speed (studs/s)", "speed", 20, 300)
-toggleRow(ctlCard, 150, "Avoid murderer", "avoid")
-toggleRow(ctlCard, 184, "Reset on full bag", "resetFull")
-toggleRow(ctlCard, 218, "Humanize movement", "humanize")
+cycleRow(ctlCard, 62, "Method", "method", {"Glide", "Hop"})
+sliderRow(ctlCard, 94, "Speed (safe ≈ 24)", "speed", 10, 60)
+sliderRow(ctlCard, 140, "Touch radius", "touchRadius", 2, 40)
+cycleRow(ctlCard, 188, "Full bag", "fullAction", {"Fling murderer", "Reset", "Wait"})
+toggleRow(ctlCard, 222, "Avoid murderer", "avoid")
 
 -- Stats page
 local statsPg = pages.Stats
@@ -784,7 +857,7 @@ toggleRow(sc, 236, "Lower speed after kick", "adaptive")
 local tips = card(safePg, "Tuning", UDim2.new(0.5, 7, 0, 0), UDim2.new(0.5, -7, 1, 0))
 sliderRow(tips, 32, "Underground depth", "offset", 1, 12)
 sliderRow(tips, 84, "Hop distance", "hopDist", 8, 60)
-sliderRow(tips, 136, "Max coin distance", "maxDist", 100, 1500)
+toggleRow(tips, 140, "Humanize movement", "humanize")
 local urlBox = New("TextBox", {
     Text = cfg.url, PlaceholderText = "Script RAW URL (for auto-start after rejoin)", ClearTextOnFocus = false,
     FontFace = FONT, TextSize = 13, TextColor3 = C.text, PlaceholderColor3 = C.sub, BackgroundColor3 = C.elem,
