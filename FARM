@@ -154,6 +154,31 @@ local function findContainer()
     end
 end
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local roleRemote
+local murdererPlayer
+local function refreshRoles()
+    if not (roleRemote and roleRemote.Parent) then
+        roleRemote = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
+    end
+    if not roleRemote then return end
+    local ok, data = pcall(function() return roleRemote:InvokeServer() end)
+    if ok and type(data) == "table" then
+        murdererPlayer = nil
+        for name, info in pairs(data) do
+            if type(info) == "table" and info.Role == "Murderer" and not info.Dead then
+                murdererPlayer = Players:FindFirstChild(tostring(name))
+            end
+        end
+    end
+end
+task.spawn(function()
+    while alive do
+        if cfg.farm and (cfg.avoid or cfg.fullAction == "Fling murderer") then pcall(refreshRoles) end
+        task.wait(2)
+    end
+end)
+
 local ignored = setmetatable({}, {__mode = "k"})
 local murdererPos, lastMurd = nil, 0
 local function updateMurderer()
@@ -161,6 +186,12 @@ local function updateMurderer()
     lastMurd = os.clock()
     murdererPos = nil
     if not cfg.avoid then return end
+    local mp = murdererPlayer
+    local mroot = mp and mp ~= LP and mp.Character and mp.Character:FindFirstChild("HumanoidRootPart")
+    if mroot then
+        murdererPos = mroot.Position
+        return
+    end
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LP and p.Character then
             local root = p.Character:FindFirstChild("HumanoidRootPart")
@@ -272,7 +303,9 @@ local function touchNear(hrp)
         end
     end
 end
-local function findMurderer()
+local function findMurderer(fresh)
+    if fresh then pcall(refreshRoles) end
+    if murdererPlayer and murdererPlayer ~= LP and murdererPlayer.Parent and murdererPlayer.Character then return murdererPlayer end
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LP and p.Character then
             local bp = p:FindFirstChild("Backpack")
@@ -280,8 +313,8 @@ local function findMurderer()
         end
     end
 end
-local function flingMurderer()
-    local p = findMurderer()
+local function flingMurderer(force)
+    local p = findMurderer(true)
     local ch, hum, hrp = getChar()
     if not (p and ch) then return false end
     local tRoot = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
@@ -291,7 +324,7 @@ local function flingMurderer()
     flying = false
     hum.PlatformStand = true
     local t0 = os.clock()
-    while alive and cfg.farm and os.clock() - t0 < 3.5 do
+    while alive and (cfg.farm or force) and os.clock() - t0 < 3.5 do
         local c2, h2, r2 = getChar()
         tRoot = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
         if not (c2 and tRoot) then break end
@@ -781,6 +814,21 @@ local function hbtn(label, xoff)
     return b
 end
 local minB, closeB = hbtn("-", -48), hbtn("X", -14)
+local flingB = New("TextButton", {
+    Text = "Fling now", FontFace = FONT, TextSize = 14, TextColor3 = C.text, BackgroundColor3 = C.elem, AutoButtonColor = false,
+    AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -88, 0, 18), Size = UDim2.fromOffset(84, 28),
+}, header)
+round(flingB, 14)
+outline(flingB, 1.5)
+flingB.MouseButton1Click:Connect(function()
+    task.spawn(function()
+        flingB.Text = "..."
+        local ok, res = pcall(flingMurderer, true)
+        flingB.Text = (ok and res) and "Flung!" or "No murderer"
+        task.wait(1.5)
+        flingB.Text = "Fling now"
+    end)
+end)
 New("Frame", {Size = UDim2.new(1, -28, 0, 1), Position = UDim2.fromOffset(14, 64), BackgroundColor3 = C.border, BorderSizePixel = 0}, main)
 
 -- drag
@@ -957,7 +1005,7 @@ for _, d in ipairs({
     {"uptime", "Session time"}, {"coins", "Session collected"}, {"bags", "By type"}, {"rate", "Per hour"}, {"day", "Projected per day"},
     {"best", "Best rate"}, {"rounds", "Rounds this session"}, {"avg", "Avg per round"}, {"total", "All-time collected"},
     {"alltime", "All-time farm time"}, {"sessions", "Sessions started"}, {"kicks", "Kicks / disconnects"},
-    {"rejoins", "Auto rejoins"}, {"reason", "Last disconnect"}, {"ping", "Ping"}, {"fps", "FPS"},
+    {"rejoins", "Auto rejoins"}, {"bagdbg", "Bag detect"}, {"murd", "Murderer"}, {"reason", "Last disconnect"}, {"ping", "Ping"}, {"fps", "FPS"},
 }) do statRow(d[1], d[2]) end
 
 -- Safety page
@@ -1052,7 +1100,7 @@ task.spawn(function()
         local el = os.clock() - session.start
         local visible = main.Visible
         if rejoinReady() then
-            subtitle.Text = "auto farm · full stats · auto rejoin ready"
+            subtitle.Text = "v3 · auto farm · full stats · auto rejoin ready"
             subtitle.TextColor3 = C.sub
         else
             subtitle.Text = "! paste Script URL in Safety for auto-restart"
@@ -1083,6 +1131,8 @@ task.spawn(function()
                 rows.sessions.Text = tostring(totals.sessions)
                 rows.kicks.Text = tostring(totals.kicks)
                 rows.rejoins.Text = tostring(totals.rejoins)
+                rows.bagdbg.Text = (bagFull() and "FULL" or "not full") .. " (cap " .. cfg.bagCap .. ")"
+                rows.murd.Text = murdererPlayer and murdererPlayer.Name or "unknown"
                 rows.reason.Text = totals.lastReason
                 rows.ping.Text = string.format("%d ms", ping)
                 rows.fps.Text = string.format("%d", fps)
