@@ -1404,32 +1404,112 @@ local function validWebhook(url)
 end
 local sendWebhook
 local lastWebhookCoins, lastWebhookAt = 0, os.clock()
+local whIcons = {}
+local whIconsLoading = false
+local function httpGetText(url)
+    local ok, res = pcall(function() return game:HttpGet(url) end)
+    if ok and type(res) == "string" and res ~= "" then return res end
+    if httpRequest then
+        local ok2, r = pcall(httpRequest, {Url = url, Method = "GET"})
+        if ok2 and type(r) == "table" and type(r.Body) == "string" then return r.Body end
+    end
+end
+local function loadWebhookIcons()
+    if whIconsLoading or next(whIcons) then return end
+    whIconsLoading = true
+    pcall(function()
+        local body = httpGetText("https://thumbnails.roblox.com/v1/assets?assetIds=3150319038,121588790682191&returnPolicy=PlaceHolder&size=250x250&format=Png&isCircular=false")
+        local data = body and HttpService:JSONDecode(body)
+        for _, item in ipairs(data and data.data or {}) do
+            if item.state == "Completed" and type(item.imageUrl) == "string" then
+                if item.targetId == 3150319038 then whIcons.coin = item.imageUrl end
+                if item.targetId == 121588790682191 then whIcons.candy = item.imageUrl end
+            end
+        end
+        body = httpGetText("https://thumbnails.roblox.com/v1/places/gameicons?placeIds=142823291&returnPolicy=PlaceHolder&size=256x256&format=Png&isCircular=false")
+        data = body and HttpService:JSONDecode(body)
+        local item = data and data.data and data.data[1]
+        if item and item.state == "Completed" and type(item.imageUrl) == "string" then whIcons.mm2 = item.imageUrl end
+    end)
+    whIconsLoading = false
+end
+task.spawn(loadWebhookIcons)
+
+local function num(n)
+    local str = tostring(math.floor((n or 0) + 0.5))
+    local k
+    repeat str, k = str:gsub("^(-?%d+)(%d%d%d)", "%1,%2") until k == 0
+    return str
+end
+local function duration(sec)
+    sec = math.floor(sec or 0)
+    local h, m = sec // 3600, (sec % 3600) // 60
+    if h > 0 then return string.format("%dh %dm", h, m) end
+    if m > 0 then return string.format("%dm %ds", m, sec % 60) end
+    return sec .. "s"
+end
+local PRESTIGE = {[0] = "", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"}
+local function gameProfile()
+    local r = {}
+    pcall(function()
+        local modules = ReplicatedStorage:FindFirstChild("Modules")
+        local profile = require(modules:FindFirstChild("ProfileData"))
+        local levels = require(modules:FindFirstChild("LevelModule"))
+        local mats = profile.Materials and profile.Materials.Owned or {}
+        r.coins = tonumber(mats.Coins)
+        local latest, key
+        for name, value in pairs(mats) do
+            local year = type(name) == "string" and tonumber(name:match("^Candies(%d+)$"))
+            if year and tonumber(value) and (not latest or year > latest) then latest, key = year, name end
+        end
+        if key then r.candies = tonumber(mats[key]) end
+        r.level = tonumber(levels.GetLevel(profile.NewXP))
+        r.prestige = tonumber(profile.Prestige) or 0
+    end)
+    return r
+end
+local STATUS_NAMES = {waiting = "Waiting", farming = "Farming", spectating = "Spectating", full = "Full bag"}
 local function webhookEmbed(kind, reason)
+    local prof = gameProfile()
     local elapsed = os.clock() - session.start
-    local types = {}
-    for name, v in pairs(session.bags) do types[#types + 1] = name .. " " .. fmt(v) end
-    local players = #Players:GetPlayers()
-    local titles = {report = "FlinFarm · Report", test = "FlinFarm · Webhook connected", kick = "FlinFarm · Disconnected"}
+    local st = cfg.farm and (STATUS_NAMES[fApi.getStatus()] or status) or "Idle"
     local fields = {
-        {name = "Status", value = status, inline = true},
-        {name = "Session", value = fmt(session.coins), inline = true},
-        {name = "Since last report", value = "+" .. fmt(session.coins - lastWebhookCoins), inline = true},
-        {name = "Per hour", value = fmt(session.rate), inline = true},
-        {name = "Projected / day", value = fmt(session.rate * 24), inline = true},
-        {name = "Types", value = #types > 0 and table.concat(types, "\n") or "-", inline = true},
-        {name = "Runtime", value = fmtTime(elapsed), inline = true},
-        {name = "Rounds", value = tostring(session.rounds or 0), inline = true},
-        {name = "All-time", value = fmt(totals.coins), inline = true},
-        {name = "Kicks / rejoins", value = totals.kicks .. " / " .. totals.rejoins, inline = true},
-        {name = "Players in server", value = tostring(players), inline = true},
-        {name = "Method / speed", value = cfg.method .. " · " .. cfg.speed, inline = true},
+        {name = "🎒 Session", value = "**+" .. num(session.coins) .. "**", inline = true},
+        {name = "📈 Per hour", value = "~" .. num(session.rate), inline = true},
+        {name = "🆕 Since last report", value = "+" .. num(session.coins - lastWebhookCoins), inline = true},
     }
+    if prof.candies ~= nil then table.insert(fields, {name = "🍬 Candies", value = num(prof.candies), inline = true}) end
+    if prof.coins ~= nil then table.insert(fields, {name = "🪙 Coins", value = num(prof.coins), inline = true}) end
+    if prof.candies == nil and prof.coins == nil then
+        local types = {}
+        for name, v in pairs(session.bags) do types[#types + 1] = name .. " " .. num(v) end
+        table.insert(fields, {name = "🍬 Collected", value = #types > 0 and table.concat(types, "\n") or "-", inline = true})
+    end
+    table.insert(fields, {name = "🏆 All-time farmed", value = num(totals.coins), inline = true})
+    if prof.level then
+        local pr = PRESTIGE[prof.prestige or 0] or tostring(prof.prestige)
+        table.insert(fields, {name = "⭐ Level", value = tostring(prof.level) .. (pr ~= "" and (" · " .. pr) or ""), inline = true})
+    end
+    table.insert(fields, {name = "📍 Status", value = st, inline = true})
+    table.insert(fields, {name = "⏱ Runtime", value = duration(elapsed), inline = true})
+    table.insert(fields, {name = "🎯 Rounds", value = tostring(session.rounds or 0), inline = true})
+    table.insert(fields, {name = "🔄 Kicks / rejoins", value = totals.kicks .. " / " .. totals.rejoins, inline = true})
+    table.insert(fields, {name = "👥 Players", value = tostring(#Players:GetPlayers()), inline = true})
+
+    local title = kind == "test" and "Webhook Connected" or "Auto Farm Report"
+    local color = prof.candies ~= nil and 16753920 or 16104778
+    local desc = string.format("**Player** `%s`\n**Server** `%s`", LP.Name, tostring(game.JobId):sub(1, 8))
+    if kind == "kick" then
+        title, color = "Disconnected", 15158332
+        desc = desc .. "\n**Reason** " .. tostring(reason or "Connection lost"):sub(1, 300)
+            .. "\n**Auto rejoin** " .. (cfg.autoRejoin and "on" or "off")
+    end
     return {
-        title = titles[kind] or titles.report,
-        description = kind == "kick" and ("Reason: " .. tostring(reason) .. "\nAuto rejoin is " .. (cfg.autoRejoin and "on." or "off.")) or nil,
-        color = kind == "kick" and 15158332 or 3815994,
+        author = {name = "Murder Mystery 2 | FlinFarm", icon_url = whIcons.mm2},
+        title = title, description = desc, color = color,
+        thumbnail = {url = prof.candies ~= nil and whIcons.candy or whIcons.coin},
         fields = fields,
-        footer = {text = "FlinFarm · " .. LP.Name},
+        footer = {text = "FlinFarm · " .. cfg.method .. " · " .. cfg.speed, icon_url = whIcons.coin},
         timestamp = DateTime.now():ToIsoDate(),
     }
 end
@@ -1462,7 +1542,8 @@ local function postWebhook(payload)
 end
 sendWebhook = function(kind, reason)
     if not validWebhook(cfg.webhookUrl) then return false, "invalid URL" end
-    local ok, info = postWebhook({username = "FlinFarm", embeds = {webhookEmbed(kind, reason)}})
+    if not next(whIcons) then pcall(loadWebhookIcons) end
+    local ok, info = postWebhook({username = "FlinFarm", avatar_url = whIcons.mm2, embeds = {webhookEmbed(kind, reason)}})
     if ok then
         lastWebhookAt, lastWebhookCoins = os.clock(), session.coins
     end
