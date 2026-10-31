@@ -344,130 +344,603 @@ local function flingMurderer(force)
     end
     return true
 end
-local jitter, nextJitter = 1, 0
-local function collect(coin, hum, hrp)
-    prep(hum)
-    local started = os.clock()
-    local touched = false
-    local checkPos, checkAt = hrp.Position, os.clock()
-    while alive and cfg.farm and coin.Parent and hrp.Parent and os.clock() - started < 7 do
-        if os.clock() - checkAt > 1.5 then
-            if (hrp.Position - checkPos).Magnitude < 0.5 then
-                -- stuck: snap straight onto the coin once, otherwise give up on it
-                hrp.CFrame = CFrame.new(coin.Position - Vector3.new(0, cfg.offset, 0)) * ROT
-                touch(hrp, coin)
-                ignored[coin] = true
-                task.delay(20, function() ignored[coin] = nil end)
-                return "stuck"
-            end
-            checkPos, checkAt = hrp.Position, os.clock()
-        end
-        local target = coin.Position - Vector3.new(0, cfg.offset, 0)
-        local diff = target - hrp.Position
-        local dist = diff.Magnitude
-        local dt
-        if cfg.method == "Hop" then
-            local step = math.min(dist, cfg.hopDist)
-            hrp.CFrame = CFrame.new(hrp.Position + (dist > 0 and diff.Unit * step or Vector3.zero)) * ROT
-            hrp.AssemblyLinearVelocity = Vector3.zero
-            touchNear(hrp)
-            if dist - step < cfg.touchRadius then touch(hrp, coin) end
-            touched = dist <= cfg.hopDist
-            task.wait(cfg.hopDelay * (cfg.humanize and (0.8 + math.random() * 0.5) or 1))
-        else
-            dt = RunService.Heartbeat:Wait()
-            if cfg.humanize and os.clock() > nextJitter then
-                jitter = 0.85 + math.random() * 0.3
-                nextJitter = os.clock() + 0.4
-                if math.random() < 0.03 then task.wait(0.12 + math.random() * 0.25) end
-            end
-            local step = cfg.speed * (cfg.humanize and jitter or 1) * dt
-            if dist <= step then
-                hrp.CFrame = CFrame.new(target) * ROT
-                touched = true
-            else
-                hrp.CFrame = CFrame.new(hrp.Position + diff.Unit * step) * ROT
-            end
-            hrp.AssemblyLinearVelocity = Vector3.zero
-            touchNear(hrp)
-            if dist < cfg.touchRadius or touched then touch(hrp, coin) end
-        end
-        if touched then break end
-        if not getChar() then return end
-    end
-    if touched then
-        ignored[coin] = true
-        task.delay(2, function() ignored[coin] = nil end)
-    else
-        ignored[coin] = true
-        task.delay(5, function() ignored[coin] = nil end)
+local function forEachYield(iterator, state, control)
+    local yield = coroutine.yield
+    yield()
+    local ok = true
+    for key, value in iterator, state, control do
+        yield(ok, key, value)
     end
 end
+AutoFarmSettings = {
+    AutoFarmEnabled = false,
+    FarmMode = "Underground",
+    TweenSpeed = 24,
+    AutoReset = false,
+    AvoidMurder = true,
+    UndergroundOffset = 4,
+    MaxDistance = 600,
+    CoinLimit = 40,
+}
+-- ===== original FlinHUB auto farm engine (settings above are fixed on purpose) =====
+(function()
+    AutoFarmSettings = AutoFarmSettings or {
+        AutoFarmEnabled = false,
+        FarmMode = "Underground",
+        TweenSpeed = 25,
+        AutoReset = false,
+        AvoidMurder = false,
+        UndergroundOffset = 4,
+        MaxDistance = 600,
+        CoinLimit = 40,
+    }
+    local Players = game:GetService("Players")
+    local RunService = game:GetService("RunService")
+    local TweenService = game:GetService("TweenService")
+    local localPlayer2 = Players.LocalPlayer
+    local v5 = AutoFarmSettings
+    local tbl6 = {isFarming = false, isActivelyFlying = false, currentTargetCoin = nil}
+    tbl6.ignoredCoins = {}
+    tbl6.currentTween = nil
+    local function fn63(instance2)
+        if not instance2 then
+            return nil
+        else
+            local torso = instance2:FindFirstChild("Torso")
+            if not torso then
+                torso = instance2:FindFirstChild("LowerTorso")
+            end
+            if not torso then
+                torso = instance2:FindFirstChild("HumanoidRootPart")
+            end
+            return torso
+        end
+    end
+    local function fn64()
+        local number2, v6 = pcall(function()
+            local mainGUI = localPlayer2.PlayerGui:FindFirstChild("MainGUI")
+            if not mainGUI then
+                return 0
+            else
+                local game2 = mainGUI:FindFirstChild("Game")
+                if not game2 then
+                    return 0
+                else
+                    local coinBags = game2:FindFirstChild("CoinBags")
+                    if not coinBags then
+                        return 0
+                    else
+                        local container = coinBags:FindFirstChild("Container")
+                        if not container then
+                            return 0
+                        else
+                            local coin = container:FindFirstChild("Coin")
+                            if not coin then
+                                return 0
+                            else
+                                local currencyFrame = coin:FindFirstChild("CurrencyFrame")
+                                if not currencyFrame then
+                                    return 0
+                                else
+                                    local icon = currencyFrame:FindFirstChild("Icon")
+                                    if not icon then
+                                        return 0
+                                    else
+                                        local coins = icon:FindFirstChild("Coins")
+                                        if not coins then
+                                            return 0
+                                        else
+                                            return coins.Text
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+        if number2 then
+            number2 = tonumber(v6) or 0
+        end
+        return number2 or 0
+    end
+    local function fn65()
+        local playerGui = localPlayer2:FindFirstChild("PlayerGui")
+        if not playerGui then
+            return false
+        else
+            local victory = playerGui:FindFirstChild("Victory")
+            if victory then
+                for _, child in pairs(victory:GetChildren()) do
+                    if child:IsA("GuiObject") and child.Visible then
+                        return true
+                    end
+                end
+            end
+            return false
+        end
+    end
+    local function fn66()
+        local playerGui = localPlayer2:FindFirstChild("PlayerGui")
+        if playerGui then
+            local mainGUI = playerGui:FindFirstChild("MainGUI")
+            local lobby = mainGUI and mainGUI:FindFirstChild("Lobby")
+            local dock
+            if lobby then
+                dock = mainGUI.Lobby:FindFirstChild("Dock")
+            else
+                dock = lobby
+            end
+            if dock then
+                local coinBags = mainGUI.Lobby.Dock:FindFirstChild("CoinBags")
+                if coinBags then
+                    local fullBagNotification = coinBags:FindFirstChild("FullBagNotification")
+                    if fullBagNotification then
+                        fullBagNotification = fullBagNotification.Visible
+                    end
+                    if fullBagNotification then
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+    local function fn67()
+        if not v5.AvoidMurder then
+            return false
+        else
+            local character = localPlayer2.Character
+            if not character then
+                return false
+            else
+                local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+                if not humanoidRootPart then
+                    return false
+                else
+                    for _, player2 in pairs(Players:GetPlayers()) do
+                        if player2 ~= localPlayer2 and player2.Character then
+                            local humanoidRootPart2 = player2.Character:FindFirstChild("HumanoidRootPart")
+                            local backpack = player2:FindFirstChild("Backpack")
+                            if humanoidRootPart2 then
+                                humanoidRootPart2 = (humanoidRootPart2.Position - humanoidRootPart.Position).Magnitude <= 10
+                            end
+                            if humanoidRootPart2 then
+                                if player2.Character:FindFirstChild("Knife") then
+                                    return true
+                                else
+                                    if backpack then
+                                        backpack = backpack:FindFirstChild("Knife")
+                                    end
+                                    if backpack then
+                                        return true
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    return false
+                end
+            end
+        end
+    end
+    local lastContainerScan = 0
+    local function findCoinContainer()
+        local cached = tbl6.container
+        if cached and cached.Parent and cached:IsDescendantOf(workspace) then
+            return cached
+        end
+        tbl6.container = nil
+        if os.clock() - lastContainerScan < 1 then
+            return nil
+        end
+        lastContainerScan = os.clock()
+        for _, inst in ipairs(workspace:GetDescendants()) do
+            if inst.Name == "CoinContainer" then
+                tbl6.container = inst
+                return inst
+            end
+        end
+        return nil
+    end
+    local function fn68(v6)
+        local container = findCoinContainer()
+        if not container then
+            return nil
+        end
+        local best, bestDist = nil, v5.MaxDistance
+        for _, obj in ipairs(container:GetChildren()) do
+            if obj:IsA("BasePart") and not tbl6.ignoredCoins[obj] and (obj.Name == "Coin_Server" or obj.Name:find("Candy") ~= nil) then
+                local dist = (v6.Position - obj.Position).Magnitude
+                if dist < bestDist then
+                    best, bestDist = obj, dist
+                end
+            end
+        end
+        return best
+    end
+    local function fn69(instance2)
+        if instance2 then
+            local humanoidRootPart = instance2:FindFirstChild("HumanoidRootPart")
+            if not humanoidRootPart then
+                return CFrame.Angles(0, 0, 0)
+            else
+                if not humanoidRootPart:FindFirstChild("FarmBV") then
+                    local bodyVelocity = Instance.new("BodyVelocity")
+                    bodyVelocity.Name = "FarmBV"
+                    bodyVelocity.MaxForce = Vector3.new(1 / 0, 1 / 0, 1 / 0)
+                    bodyVelocity.Velocity = Vector3.new(0, 0, 0)
+                    bodyVelocity.Parent = humanoidRootPart
+                end
+                local farmBG = humanoidRootPart:FindFirstChild("FarmBG")
+                if not farmBG then
+                    farmBG = Instance.new("BodyGyro")
+                    farmBG.Name = "FarmBG"
+                    farmBG.MaxTorque = Vector3.new(1 / 0, 1 / 0, 1 / 0)
+                    farmBG.P = 50000
+                    farmBG.Parent = humanoidRootPart
+                    local _, v6 = humanoidRootPart.CFrame:ToOrientation()
+                    local value2 = CFrame.new(humanoidRootPart.Position) * CFrame.Angles(0, v6, 0)
+                    local angles = CFrame.Angles
+                    farmBG.CFrame = value2 * angles(-1.5707963267948966, 0, 0)
+                end
+                return farmBG.CFrame.Rotation
+            end
+        end
+    end
+    local function fn70()
+        local character = localPlayer2.Character
+        if character then
+            local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+            if humanoidRootPart then
+                if humanoidRootPart:FindFirstChild("FarmBV") then
+                    humanoidRootPart.FarmBV:Destroy()
+                end
+                if humanoidRootPart:FindFirstChild("FarmBG") then
+                    humanoidRootPart.FarmBG:Destroy()
+                end
+                if humanoidRootPart.Anchored then
+                    humanoidRootPart.Anchored = false
+                end
+            end
+        end
+    end
+    local function fn71()
+        local character = localPlayer2.Character
+        if character then
+            local humanoid = character:FindFirstChild("Humanoid")
+            if humanoid then
+                humanoid.PlatformStand = true
+            end
+            for _, descendant in pairs(character:GetDescendants()) do
+                if descendant:IsA("BasePart") and descendant.CanCollide then
+                    descendant.CanCollide = false
+                end
+            end
+        end
+    end
+    local function fn72(v6, instance2, v7, v8, v9)
+        local magnitude = (v8.Position - v6).Magnitude
+        local currentTween = TweenService:Create(v7, TweenInfo.new(magnitude / v5.TweenSpeed, Enum.EasingStyle.Linear), {CFrame = CFrame.new(v6) * v9})
+        tbl6.currentTween = currentTween
+        local enabled3 = false
+        currentTween:Play()
+        local connection4 = nil
+        connection4 = RunService.Heartbeat:Connect(function()
+            if not tbl6.isFarming or not instance2 or not instance2:IsDescendantOf(workspace) then
+                currentTween:Cancel()
+                if connection4 then
+                    connection4:Disconnect()
+                end
+            else
+                local magnitude2 = (v8.Position - v6).Magnitude
+                if firetouchinterest then
+                    pcall(function()
+                        firetouchinterest(v8, instance2, 0)
+                        firetouchinterest(v8, instance2, 1)
+                    end)
+                end
+                if magnitude2 <= 1.5 then
+                    enabled3 = true
+                    currentTween:Cancel()
+                    if connection4 then
+                        connection4:Disconnect()
+                    end
+                end
+            end
+        end)
+        while true do
+            if connection4 and connection4.Connected then
+                RunService.Heartbeat:Wait()
+                continue
+            end
+            break
+        end
+        return enabled3
+    end
+    local function fn73(instance2)
+        if not instance2 or not instance2.Parent or not instance2:FindFirstChild("TouchInterest") then
+            return false
+        else
+            local character = localPlayer2.Character
+            if not character then
+                return false
+            else
+                local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+                local humanoid = character:FindFirstChildOfClass("Humanoid")
+                if not humanoidRootPart or not humanoid then
+                    return false
+                else
+                    local position = instance2.Position
+                    local value2 = position + Vector3.new(0, 2, 0)
+                    if (humanoidRootPart.Position - value2).Magnitude < 5 then
+                        return true
+                    else
+                        if tbl6.currentTween then
+                            pcall(function()
+                                tbl6.currentTween:Cancel()
+                            end)
+                        end
+                        tbl6.currentTween = TweenService:Create(humanoidRootPart, TweenInfo.new((humanoidRootPart.Position - value2).Magnitude / v5.TweenSpeed, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {CFrame = CFrame.new(value2)})
+                        humanoid.Sit = true
+                        tbl6.currentTween:Play()
+                        local enabled3 = false
+                        local connection4 = nil
+                        connection4 = tbl6.currentTween.Completed:Connect(function()
+                            enabled3 = true
+                            if connection4 then
+                                connection4:Disconnect()
+                            end
+                        end)
+                        local v6 = tick()
+                        while true do
+                            if not enabled3 and tbl6.isFarming then
+                                task.wait(0.1)
+                                if not instance2 or not instance2.Parent or not instance2:FindFirstChild("TouchInterest") then
+                                    break
+                                elseif tick() - v6 > 30 then
+                                    if tbl6.currentTween then
+                                        pcall(function()
+                                            tbl6.currentTween:Cancel()
+                                        end)
+                                    end
+                                    humanoid.Sit = false
+                                    return false
+                                end
+                            else
+                                humanoid.Sit = false
+                                return enabled3
+                            end
+                        end
+                        if tbl6.currentTween then
+                            pcall(function()
+                                tbl6.currentTween:Cancel()
+                            end)
+                        end
+                        humanoid.Sit = false
+                        return false
+                    end
+                end
+            end
+        end
+    end
+    local function fn74(instance2)
+        if not (not instance2 or not instance2.Parent) then
+            local humanoidRootPart = localPlayer2.Character and localPlayer2.Character:FindFirstChild("HumanoidRootPart")
+            if humanoidRootPart then
+                pcall(function()
+                    firetouchinterest(humanoidRootPart, instance2, 0)
+                    task.wait(0.05)
+                    firetouchinterest(humanoidRootPart, instance2, 1)
+                end)
+            end
+        end
+    end
+    local function fn75()
+        if not tbl6.isFarming then
+            tbl6.isFarming = true
+            table.clear(tbl6.ignoredCoins)
+            task.spawn(function()
+                while true do
+                    if tbl6.isFarming then
+                        task.wait()
+                        if not pcall(function()
+                            if fn67() then
+                                tbl6.isActivelyFlying = false
+                                tbl6.currentTargetCoin = nil
+                                fn70()
+                                local character = localPlayer2.Character
+                                if character then
+                                    local humanoid = character:FindFirstChild("Humanoid")
+                                    if humanoid then
+                                        humanoid.Sit = false
+                                    end
+                                end
+                                task.wait(1)
+                            else
+                                local character = localPlayer2.Character
+                                if character then
+                                    local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+                                    local v6 = fn63(character)
+                                    local humanoid = character:FindFirstChild("Humanoid")
+                                    if not humanoidRootPart or not v6 or not humanoid or humanoid.Health <= 0 then
+                                        tbl6.isActivelyFlying = false
+                                        tbl6.currentTargetCoin = nil
+                                        fn70()
+                                        task.wait(1)
+                                    elseif fn65() or fn66() then
+                                        tbl6.isActivelyFlying = false
+                                        tbl6.currentTargetCoin = nil
+                                        fn70()
+                                        if humanoid then
+                                            humanoid.Sit = false
+                                        end
+                                        task.wait(1)
+                                    else
+                                        if v5.AutoReset then
+                                            local v7 = fn64()
+                                            if v5.CoinLimit <= v7 then
+                                                humanoid.Health = 0
+                                                task.wait(5)
+                                                return
+                                            end
+                                        end
+                                        local currentTargetCoin = fn68(v6)
+                                        if not currentTargetCoin or not currentTargetCoin:IsDescendantOf(workspace) then
+                                            tbl6.isActivelyFlying = false
+                                            tbl6.currentTargetCoin = nil
+                                            fn70()
+                                            if humanoid then
+                                                humanoid.Sit = false
+                                            end
+                                            task.wait(0.5)
+                                        else
+                                            tbl6.isActivelyFlying = true
+                                            tbl6.currentTargetCoin = currentTargetCoin
+                                            local isFarming
+                                            if v5.FarmMode == "Underground" then
+                                                fn71()
+                                                local v7 = fn69(character)
+                                                isFarming = fn72(currentTargetCoin.Position - Vector3.new(0, v5.UndergroundOffset, 0), currentTargetCoin, humanoidRootPart, v6, v7)
+                                            else
+                                                isFarming = false
+                                                if v5.FarmMode == "Sit" then
+                                                    isFarming = fn73(currentTargetCoin)
+                                                    if isFarming and tbl6.isFarming and humanoid.Health > 0 then
+                                                        fn74(currentTargetCoin)
+                                                    end
+                                                end
+                                            end
+                                            if isFarming then
+                                                isFarming = tbl6.isFarming
+                                            end
+                                            if isFarming then
+                                                isFarming = humanoid.Health > 0
+                                            end
+                                            if isFarming then
+                                                tbl6.ignoredCoins[currentTargetCoin] = true
+                                                task.delay(5, function()
+                                                    tbl6.ignoredCoins[currentTargetCoin] = nil
+                                                end)
+                                                task.wait(0.2)
+                                            end
+                                            tbl6.currentTargetCoin = nil
+                                        end
+                                    end
+                                end
+                            end
+                        end) then
+                            tbl6.isActivelyFlying = false
+                            tbl6.currentTargetCoin = nil
+                            fn70()
+                            task.wait(1)
+                            continue
+                        else
+                            continue
+                        end
+                        continue
+                    end
+                    break
+                end
+            end)
+        end
+    end
+    local function fn76()
+        tbl6.isFarming = false
+        tbl6.isActivelyFlying = false
+        tbl6.currentTargetCoin = nil
+        if tbl6.currentTween then
+            pcall(function()
+                tbl6.currentTween:Cancel()
+            end)
+            tbl6.currentTween = nil
+        end
+        fn70()
+        local character = localPlayer2.Character
+        if character then
+            local humanoid = character:FindFirstChild("Humanoid")
+            if humanoid then
+                humanoid.PlatformStand = false
+                humanoid.Sit = false
+            end
+        end
+    end
+    RunService.Stepped:Connect(function()
+        if not (not tbl6.isFarming or not tbl6.isActivelyFlying or v5.FarmMode ~= "Underground") then
+            local character = localPlayer2.Character
+            if character then
+                local humanoid = character:FindFirstChild("Humanoid")
+                if humanoid then
+                    humanoid.PlatformStand = true
+                end
+                for _, descendant in pairs(character:GetDescendants()) do
+                    if descendant:IsA("BasePart") and descendant.CanCollide then
+                        descendant.CanCollide = false
+                    end
+                end
+            end
+        end
+    end)
+    getgenv().Flin_SetAutoFarm = function(v6)
+        if v6 then
+            fn75()
+        else
+            fn76()
+        end
+    end
+end)();
 
-local stuckCount = 0
+local farmApplied, fullHandling = false, false
+local function setFarm(on)
+    farmApplied = on
+    pcall(getgenv().Flin_SetAutoFarm, on)
+    if not on then release() end
+end
+local function waitWhile(cond, maxSeconds)
+    local t0 = os.clock()
+    while alive and cfg.farm and cond() and os.clock() - t0 < maxSeconds do task.wait(0.5) end
+end
+local function handleFull()
+    setFarm(false)
+    local act = cfg.fullAction
+    if findContainer() then
+        if act == "Fling murderer" then
+            setStatus("Bag full → fling murderer", AMBER)
+            local okF, flung = pcall(flingMurderer)
+            if not (okF and flung) then setStatus("No murderer found", AMBER) end
+            setStatus("Waiting for round end", AMBER)
+            waitWhile(function() return findContainer() ~= nil and bagFull() end, 25)
+            local _, hum2 = getChar()
+            if hum2 and findContainer() and bagFull() then
+                setStatus("Bag full → reset", AMBER)
+                hum2.Health = 0
+                task.wait(4)
+            end
+        elseif act == "Reset" then
+            setStatus("Bag full → reset", AMBER)
+            local _, hum2 = getChar()
+            if hum2 then hum2.Health = 0 end
+            task.wait(4)
+        end
+    end
+    setStatus("Waiting for next round", GREY)
+    waitWhile(bagFull, 90)
+    fullHandling = false
+end
 task.spawn(function()
     while alive do
+        task.wait(0.3)
         if not cfg.farm then
-            release()
+            if farmApplied then setFarm(false) end
             setStatus("Idle", GREY)
-            task.wait(0.3)
-        else
-            local ch, hum, hrp = getChar()
-            if not ch then
-                release()
-                setStatus("Respawning", AMBER)
-                task.wait(0.4)
-            elseif bagFull() then
-                release()
-                local act = cfg.fullAction
-                if act == "Fling murderer" then
-                    setStatus("Bag full → fling murderer", AMBER)
-                    local okF, flung = pcall(flingMurderer)
-                    if not (okF and flung) then setStatus("No murderer found → waiting", AMBER) task.wait(1) end
-                    setStatus("Waiting for round end", AMBER)
-                    local t0 = os.clock()
-                    while alive and cfg.farm and findContainer() and bagFull() and os.clock() - t0 < 25 do
-                        task.wait(0.5)
-                    end
-                    local c4, h4 = getChar()
-                    if h4 and findContainer() and bagFull() then
-                        setStatus("Bag full → reset", AMBER)
-                        h4.Health = 0
-                        task.wait(4)
-                    end
-                elseif act == "Reset" then
-                    setStatus("Bag full → reset", AMBER)
-                    hum.Health = 0
-                    task.wait(4)
-                else
-                    setStatus("Bag full", AMBER)
-                    task.wait(1)
-                end
-            elseif not findContainer() then
-                release()
-                setStatus("Waiting for round", GREY)
-                task.wait(0.5)
+        elseif not fullHandling then
+            if bagFull() and findContainer() then
+                fullHandling = true
+                task.spawn(handleFull)
             else
-                local coin = pickCoin(hrp.Position)
-                if not coin then
-                    setStatus("Searching coins", GREY)
-                    task.wait(0.15)
-                else
-                    setStatus("Farming", GREEN)
-                    local okc, res = pcall(collect, coin, hum, hrp)
-                    if okc and res == "stuck" then
-                        stuckCount += 1
-                        if stuckCount >= 3 then
-                            stuckCount = 0
-                            setStatus("Stuck → reset", AMBER)
-                            release()
-                            hum.Health = 0
-                            task.wait(4)
-                        end
-                    else
-                        stuckCount = 0
-                    end
-                end
+                if not farmApplied then setFarm(true) end
+                setStatus(findContainer() and "Farming" or "Waiting for round", findContainer() and GREEN or GREY)
             end
         end
     end
@@ -1045,11 +1518,11 @@ local function cycleRow(parent, y, label, key, options)
         save(true)
     end)
 end
-cycleRow(ctlCard, 62, "Method", "method", {"Glide", "Hop"})
-sliderRow(ctlCard, 94, "Speed (safe ≈ 24)", "speed", 10, 60)
-sliderRow(ctlCard, 140, "Touch radius", "touchRadius", 2, 40)
-cycleRow(ctlCard, 188, "Full bag", "fullAction", {"Fling murderer", "Reset", "Wait"})
-toggleRow(ctlCard, 222, "Avoid murderer", "avoid")
+cycleRow(ctlCard, 66, "Full bag", "fullAction", {"Fling murderer", "Reset", "Wait"})
+local note = text(ctlCard, "Farm engine = original FlinHUB auto farm.\nMode: Underground · 24 studs/s · avoid murderer.\nSettings are fixed to stay under the kick limit.", 13, C.sub, UDim2.fromOffset(14, 110), UDim2.new(1, -28, 0, 70))
+note.TextWrapped = true
+note.TextYAlignment = Enum.TextYAlignment.Top
+note.TextTruncate = Enum.TextTruncate.None
 
 -- Stats page
 local statsPg = pages.Stats
@@ -1083,14 +1556,12 @@ toggleRow(sc, 168, "Potato mode (no textures)", "potato", applyPotato)
 toggleRow(sc, 202, "White screen", "whiteScreen", applyWhite)
 toggleRow(sc, 236, "Lower speed after kick", "adaptive")
 local tips = card(safePg, "Tuning", UDim2.new(0.5, 7, 0, 0), UDim2.new(0.5, -7, 1, 0))
-sliderRow(tips, 28, "Underground depth", "offset", 1, 12)
-sliderRow(tips, 72, "Bag size (full at)", "bagCap", 10, 200)
-sliderRow(tips, 116, "Min players (0 = off)", "minPlayers", 0, 12)
-toggleRow(tips, 162, "Humanize movement", "humanize")
+sliderRow(tips, 32, "Bag size (full at)", "bagCap", 10, 200)
+sliderRow(tips, 84, "Min players (0 = off)", "minPlayers", 0, 12)
 local urlBox = New("TextBox", {
     Text = cfg.url, PlaceholderText = "Script RAW URL (for auto-start after rejoin)", ClearTextOnFocus = false,
     FontFace = FONT, TextSize = 13, TextColor3 = C.text, PlaceholderColor3 = C.sub, BackgroundColor3 = C.elem,
-    Position = UDim2.fromOffset(12, 198), Size = UDim2.new(1, -24, 0, 26), TextXAlignment = Enum.TextXAlignment.Left,
+    Position = UDim2.fromOffset(12, 140), Size = UDim2.new(1, -24, 0, 26), TextXAlignment = Enum.TextXAlignment.Left,
     TextTruncate = Enum.TextTruncate.AtEnd,
 }, tips)
 round(urlBox, 8)
@@ -1100,7 +1571,7 @@ urlBox.FocusLost:Connect(function()
     save(true)
     queueReload(true)
 end)
-local hint = text(tips, "Rejoin-ready: " .. ((SCRIPT_URL ~= "" or cfg.url ~= "") and "yes" or "NO - paste the URL above") .. ". Faster = higher kick risk; speed drops 25% after each kick.", 13, C.sub, UDim2.fromOffset(12, 228), UDim2.new(1, -24, 0, 36))
+local hint = text(tips, "Rejoin-ready: " .. ((SCRIPT_URL ~= "" or cfg.url ~= "") and "yes" or "NO - paste the URL above") .. ". Faster = higher kick risk; speed drops 25% after each kick.", 13, C.sub, UDim2.fromOffset(12, 174), UDim2.new(1, -24, 0, 60))
 hint.TextWrapped = true
 hint.TextYAlignment = Enum.TextYAlignment.Top
 hint.TextTruncate = Enum.TextTruncate.None
@@ -1164,7 +1635,7 @@ task.spawn(function()
         local el = os.clock() - session.start
         local visible = main.Visible
         if rejoinReady() then
-            subtitle.Text = "v4 · auto farm · full stats · auto rejoin ready"
+            subtitle.Text = "v5 · auto farm · full stats · auto rejoin ready"
             subtitle.TextColor3 = C.sub
         else
             subtitle.Text = "! paste Script URL in Safety for auto-restart"
