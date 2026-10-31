@@ -36,6 +36,7 @@ local cfg = {
     farm = false, method = "Under Map", speed = 21, fullAction = "Fling murderer", avoid = true,
     autoRejoin = true, antiAfk = true, autoStart = true, renderOff = false, potato = false, whiteScreen = false,
     adaptive = true, url = "", minPlayers = 4,
+    pickGun = true, shootOnFull = true, respawnOnFull = false, flingAfterRespawn = false,
     webhookUrl = "", webhookOn = false, webhookMinutes = 10, webhookKick = true,
 }
 local totals = {coins = 0, sessions = 0, rounds = 0, kicks = 0, rejoins = 0, bestRate = 0, seconds = 0, lastReason = "-", bags = {}}
@@ -188,7 +189,36 @@ local FarmRuntime = {}
 function FarmRuntime.zombie() return nil end
 function FarmRuntime.zombieTarget() return nil end
 function FarmRuntime.zombieFling() end
-function FarmRuntime.shoot() return false end
+function FarmRuntime.shoot(context, motion, target)
+    -- выстрел из пистолета по цели (персонаж убийцы), как в PulseHub: Gun.Shoot:FireServer(CFrame, CFrame)
+    local ch = LP.Character
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    if not target or not ch or not hum or hum.Health <= 0 then return false end
+    local gun = ch:FindFirstChild("Gun")
+    if not gun then
+        local bp = LP:FindFirstChild("Backpack")
+        local tool = bp and bp:FindFirstChild("Gun")
+        if not tool then return false end
+        pcall(function() hum:EquipTool(tool) end)
+        return true
+    end
+    local shoot = gun:FindFirstChild("Shoot")
+    local tRoot = target:FindFirstChild("HumanoidRootPart")
+    local root = ch:FindFirstChild("HumanoidRootPart")
+    local head = ch:FindFirstChild("Head")
+    if not shoot or not tRoot or not root then return false end
+    local gyro = root:FindFirstChild("PulseFarmBG")
+    if gyro then pcall(function() gyro:Destroy() end) end
+    local muzzle = root:FindFirstChild("GunRaycastAttachment")
+    local origin = muzzle and muzzle.WorldPosition or (head and head.Position) or root.Position
+    -- упреждение по скорости цели (примерно по пингу)
+    local vel = tRoot.AssemblyLinearVelocity
+    local lead = math.clamp((ping or 0) / 1000 + (tRoot.Position - origin).Magnitude / 250, 0.05, 0.35)
+    local aimPos = tRoot.Position + Vector3.new(vel.X, 0, vel.Z) * lead
+    if (aimPos - origin).Magnitude < 0.3 then return false end
+    local sent = pcall(function() shoot:FireServer(CFrame.new(origin, aimPos), CFrame.new(aimPos)) end)
+    return sent
+end
 function FarmState_save() end
 
 local FarmState = {}
@@ -1178,8 +1208,24 @@ function FarmRuntime.install(context)
 end
 -- ───────── glue: engine <-> FlinFarm ─────────
 local farmCfg = {method = "Under Map", speed = 21, fastSpeed = 24, tpSpeed = 25}
+local gunDrops, watchingDrops = setmetatable({}, {__mode = "k"}), false
+local function findGunDrop()
+    if not watchingDrops then
+        watchingDrops = true
+        local function remember(part)
+            if part.Name == "GunDrop" and part:IsA("BasePart") then gunDrops[part] = true end
+        end
+        bind(workspace.DescendantAdded, remember)
+        for _, part in ipairs(workspace:GetDescendants()) do remember(part) end
+    end
+    for part in pairs(gunDrops) do
+        if part.Parent and part.Name == "GunDrop" and part:IsDescendantOf(workspace) then return part end
+        gunDrops[part] = nil
+    end
+    return nil
+end
 local ctx = {environment = ENV, configuration = {farm = farmCfg}, workspace = workspace, players = Players, player = LP,
-    collection = CollectionService, storage = ReplicatedStorage, http = HttpService, drops = {findDrop = function() return nil end},
+    collection = CollectionService, storage = ReplicatedStorage, http = HttpService, drops = {findDrop = findGunDrop},
     roles = getRoles, runService = RunService, connect = bind, isAlive = function() return alive end}
 function FarmState.create()
     return {enabled = false, round = false, active = false, session = 0, total = 0, rate = 0,
@@ -1255,10 +1301,29 @@ local function syncFarmCfg()
     farmCfg.speed = math.clamp(cfg.speed, 8, 22)
     farmCfg.fastSpeed = math.clamp(cfg.speed + 3, 8, 24)
     farmCfg.tpSpeed = math.clamp(cfg.speed + 4, 10, 26)
-    fState.respawnOnFull = cfg.fullAction == "Reset"
+    fState.respawnOnFull = cfg.respawnOnFull
     fState.avoidMurder = cfg.avoid
+    fState.pickGun = cfg.pickGun
+    fState.shootOnFull = cfg.shootOnFull
 end
 local engineOn = false
+local respawnFlinging = false
+-- Auto-Fling Murder after respawn: после авто-респавна (мешок полон) флингуем убийцу
+bind(LP.CharacterAdded, function()
+    if not (cfg.flingAfterRespawn and cfg.farm and fState.round) or respawnFlinging then return end
+    if not fState.lastRespawn or tick() - fState.lastRespawn > 30 then return end
+    respawnFlinging = true
+    task.spawn(function()
+        task.wait(1.5)
+        if alive and cfg.farm and fState.round and getChar() then
+            fState.flinging = true
+            setStatus("Fling murderer after respawn", AMBER)
+            pcall(flingMurderer)
+            fState.flinging = false
+        end
+        respawnFlinging = false
+    end)
+end)
 local function handleFull()
     fState.flinging = true
     setStatus("Bag full → fling murderer", AMBER)
@@ -1293,7 +1358,6 @@ task.spawn(function()
             elseif st == "spectating" then setStatus("Spectating / dead", GREY)
             elseif st == "full" then
                 setStatus("Bag full", AMBER)
-                if cfg.fullAction == "Fling murderer" and fState.round and fState.active then task.spawn(handleFull) end
             else setStatus("Farming", GREEN) end
         end
     end
@@ -1371,13 +1435,30 @@ local function webhookEmbed(kind, reason)
 end
 local function postWebhook(payload)
     if not httpRequest then return false, "executor has no request()" end
-    local ok, res = pcall(httpRequest, {
-        Url = cfg.webhookUrl, Method = "POST",
-        Headers = {["Content-Type"] = "application/json"}, Body = HttpService:JSONEncode(payload),
-    })
-    if not ok then return false, tostring(res) end
-    local code = type(res) == "table" and (res.StatusCode or res.status_code) or 0
-    return code >= 200 and code < 300, code
+    local body = HttpService:JSONEncode(payload)
+    local urls = {cfg.webhookUrl}
+    -- запасной вариант, если executor не может достучаться до discord.com напрямую
+    urls[2] = cfg.webhookUrl:gsub("^https://[%w%.]*discord%.com", "https://webhook.lewisakura.moe")
+    local lastErr = "no response"
+    for _, url in ipairs(urls) do
+        local ok, res = pcall(httpRequest, {
+            Url = url, Method = "POST",
+            Headers = {["Content-Type"] = "application/json"}, Body = body,
+        })
+        if not ok then
+            lastErr = tostring(res)
+        elseif type(res) ~= "table" then
+            lastErr = "bad response: " .. type(res)
+        else
+            local code = tonumber(res.StatusCode or res.status_code or res.Status or res.status) or 0
+            if (code >= 200 and code < 300) or (code == 0 and res.Success == true) then
+                return true, code
+            end
+            local msg = tostring(res.StatusMessage or res.Body or "")
+            lastErr = "HTTP " .. code .. (msg ~= "" and (" " .. msg:sub(1, 80)) or "")
+        end
+    end
+    return false, lastErr
 end
 sendWebhook = function(kind, reason)
     if not validWebhook(cfg.webhookUrl) then return false, "invalid URL" end
@@ -1940,11 +2021,18 @@ local function cycleRow(parent, y, label, key, options)
         save(true)
     end)
 end
-cycleRow(ctlCard, 62, "Method", "method", {"Under Map", "Teleport", "Fast"})
-sliderRow(ctlCard, 94, "Speed", "speed", 8, 22)
-cycleRow(ctlCard, 140, "Full bag", "fullAction", {"Fling murderer", "Reset", "Wait"})
-toggleRow(ctlCard, 174, "Avoid murderer", "avoid")
-local note = text(ctlCard, "Under Map = safest. Teleport = fastest, moves only when the speed limit allows. Fast = direct flight. Speed is capped by the engine.", 13, C.sub, UDim2.fromOffset(14, 208), UDim2.new(1, -28, 0, 50))
+local ctlScroll = New("ScrollingFrame", {
+    Position = UDim2.fromOffset(0, 62), Size = UDim2.new(1, 0, 1, -66), BackgroundTransparency = 1, BorderSizePixel = 0,
+    ScrollBarThickness = 3, ScrollBarImageColor3 = C.border, CanvasSize = UDim2.new(0, 0, 0, 340),
+}, ctlCard)
+cycleRow(ctlScroll, 0, "Method", "method", {"Under Map", "Teleport", "Fast"})
+sliderRow(ctlScroll, 32, "Speed", "speed", 8, 22)
+toggleRow(ctlScroll, 80, "Pick Up Gun", "pickGun")
+toggleRow(ctlScroll, 112, "Shoot Murderer on full bag", "shootOnFull")
+toggleRow(ctlScroll, 144, "Auto-Respawn on full bag", "respawnOnFull")
+toggleRow(ctlScroll, 176, "Avoid murderer", "avoid")
+toggleRow(ctlScroll, 208, "Auto-Fling Murder after respawn", "flingAfterRespawn")
+local note = text(ctlScroll, "Full bag: if you hold the gun, shoot the murderer; otherwise reset (if Auto-Respawn is on) or hide and wait. Under Map = safest. Teleport = fastest. Fast = direct flight.", 13, C.sub, UDim2.fromOffset(14, 250), UDim2.new(1, -28, 0, 70))
 note.TextWrapped = true
 note.TextYAlignment = Enum.TextYAlignment.Top
 note.TextTruncate = Enum.TextTruncate.None
