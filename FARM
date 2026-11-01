@@ -36,7 +36,7 @@ local cfg = {
     farm = false, method = "Under Map", speed = 21, fullAction = "Fling murderer", avoid = true,
     autoRejoin = true, antiAfk = true, autoStart = true, renderOff = false, potato = false, whiteScreen = false,
     adaptive = true, url = "", minPlayers = 4,
-    pickGun = true, shootOnFull = true, respawnOnFull = false, flingAfterRespawn = false,
+    pickGun = true, shootOnFull = true, respawnOnFull = false, flingAfterRespawn = false, flingFull = true, killAura = true, noclip = true, zShoot = true, zKill = true, zFling = true,
     webhookUrl = "", webhookOn = false, webhookMinutes = 10, webhookKick = true,
 }
 local totals = {coins = 0, sessions = 0, rounds = 0, kicks = 0, rejoins = 0, bestRate = 0, seconds = 0, lastReason = "-", bags = {}}
@@ -189,34 +189,48 @@ local FarmRuntime = {}
 function FarmRuntime.zombie() return nil end
 function FarmRuntime.zombieTarget() return nil end
 function FarmRuntime.zombieFling() end
+local shotDbg = {text = "no shots yet", n = 0}
+local aimCycle = 0
 function FarmRuntime.shoot(context, motion, target)
-    -- выстрел из пистолета по цели (персонаж убийцы), как в PulseHub: Gun.Shoot:FireServer(CFrame, CFrame)
     local ch = LP.Character
     local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-    if not target or not ch or not hum or hum.Health <= 0 then return false end
+    if not target or not ch or not hum or hum.Health <= 0 then shotDbg.text = "no target / dead"; return false end
     local gun = ch:FindFirstChild("Gun")
     if not gun then
         local bp = LP:FindFirstChild("Backpack")
         local tool = bp and bp:FindFirstChild("Gun")
-        if not tool then return false end
+        if not tool then shotDbg.text = "no gun"; return false end
         pcall(function() hum:EquipTool(tool) end)
-        return true
+        shotDbg.text = "equipping gun"
+        return false
     end
     local shoot = gun:FindFirstChild("Shoot")
     local tRoot = target:FindFirstChild("HumanoidRootPart")
     local root = ch:FindFirstChild("HumanoidRootPart")
-    local head = ch:FindFirstChild("Head")
-    if not shoot or not tRoot or not root then return false end
+    if not shoot or not tRoot or not root then shotDbg.text = "gun has no Shoot remote"; return false end
+    local nowT = os.clock()
+    if nowT - (shotDbg.t or 0) < 0.3 then return false end
+    shotDbg.t = nowT
     local gyro = root:FindFirstChild("PulseFarmBG")
     if gyro then pcall(function() gyro:Destroy() end) end
-    local muzzle = root:FindFirstChild("GunRaycastAttachment")
+    local muzzle = ch:FindFirstChild("GunRaycastAttachment", true)
+    local head = ch:FindFirstChild("Head")
     local origin = muzzle and muzzle.WorldPosition or (head and head.Position) or root.Position
-    -- упреждение по скорости цели (примерно по пингу)
+    local dist = (tRoot.Position - origin).Magnitude
     local vel = tRoot.AssemblyLinearVelocity
-    local lead = math.clamp((ping or 0) / 1000 + (tRoot.Position - origin).Magnitude / 250, 0.05, 0.35)
-    local aimPos = tRoot.Position + Vector3.new(vel.X, 0, vel.Z) * lead
-    if (aimPos - origin).Magnitude < 0.3 then return false end
+    if vel.Magnitude > 120 then vel = Vector3.zero end
+    -- ping ~ ms, + travel time; ping может быть в мс
+    local p = (ping or 0)
+    if p > 5 then p = p / 1000 end
+    local lead = math.clamp(p + dist / 300 + 0.04, 0.05, 0.45)
+    aimCycle = (aimCycle % 3) + 1
+    local yOff = ({0, 1.2, -0.8})[aimCycle]
+    local aimPos = tRoot.Position + Vector3.new(vel.X * lead, yOff, vel.Z * lead)
+    if (aimPos - origin).Magnitude < 0.3 then shotDbg.text = "too close"; return false end
     local sent = pcall(function() shoot:FireServer(CFrame.new(origin, aimPos), CFrame.new(aimPos)) end)
+    shotDbg.n += 1
+    shotDbg.text = string.format("shot #%d  dist %.0f  %s", shotDbg.n, dist, sent and "sent" or "error")
+    shotDbg.last = nowT
     return sent
 end
 function FarmState_save() end
@@ -1019,7 +1033,7 @@ function FarmRuntime.tick(context, state, motion, runtime, delta)
 			if target and now - (motion.shootT or 0) >= 0.2 then motion.shootT = now; pcall(FarmRuntime.shoot, context, motion, target) end
 			handled = target ~= nil
 		end
-		if not handled and state.respawnOnFull and not state.forcedFull and not state.respawnPending and tickTime - (state.lastRespawn or 0) > 3 then
+		if not handled and state.respawnOnFull and not state.flinging and not state.forcedFull and not state.respawnPending and tickTime - (state.lastRespawn or 0) > 3 then
 			state.respawnPending = true
 			environment.task.delay(0.4, function()
 				state.respawnPending = false
@@ -1036,10 +1050,10 @@ function FarmRuntime.tick(context, state, motion, runtime, delta)
 		runtime.gunAt = now
 		local drop = state.pickGun and context.drops.findDrop() or nil
 		local role = ok and type(roles) == "table" and roles[context.player.Name]
-		if not drop or SheriffRuntime.gun(context) or not role or tostring(role.Role) ~= "Innocent" or role.Dead == true or role.Killed == true then
+		if not drop or SheriffRuntime.gun(context) or not role or not (tostring(role.Role) == "Innocent" or tostring(role.Role) == "Survivor") or role.Dead == true or role.Killed == true then
 			motion.gunTarget, motion.gunSince = nil, nil
 		end
-		if drop and not SheriffRuntime.gun(context) and role and tostring(role.Role) == "Innocent" and role.Dead ~= true and role.Killed ~= true then
+		if drop and not SheriffRuntime.gun(context) and role and (tostring(role.Role) == "Innocent" or tostring(role.Role) == "Survivor") and role.Dead ~= true and role.Killed ~= true then
 			if motion.gunSeen ~= drop then motion.gunSeen, motion.gunSince = drop, now end
 			FarmMotion.touch(context, character, drop)
 			if now - motion.gunSince > 0.8 and motion.gunTarget ~= drop then
@@ -1260,7 +1274,10 @@ local function murdererName()
     return p and p.Name or "unknown"
 end
 
+local flingBusy = false
 local function flingMurderer(force)
+    flingBusy = true
+    local okRun, resRun = pcall(function()
     local roles = getRoles()
     local mp, mch = AimTarget.murderer(ctx, roles)
     if not mp then
@@ -1294,6 +1311,9 @@ local function flingMurderer(force)
         h3.PlatformStand = false
     end
     return true
+    end)
+    flingBusy = false
+    return okRun and resRun or false
 end
 
 local function syncFarmCfg()
@@ -1305,6 +1325,8 @@ local function syncFarmCfg()
     fState.avoidMurder = cfg.avoid
     fState.pickGun = cfg.pickGun
     fState.shootOnFull = cfg.shootOnFull
+    fState.killAura = cfg.killAura
+    farmCfg.zShoot, farmCfg.zKill, farmCfg.zFling = cfg.zShoot, cfg.zKill, cfg.zFling
 end
 local engineOn = false
 local respawnFlinging = false
@@ -1324,24 +1346,159 @@ bind(LP.CharacterAdded, function()
         respawnFlinging = false
     end)
 end)
+
+-- ───────── Zombie mode provider (замена внешнего __pulseDuel из PulseHub) ─────────
+local function roleOf(p)
+    local r = roleState.roles and roleState.roles[p.Name]
+    return r and tostring(r.Role) or nil
+end
+local function aliveChar(p)
+    local ch = p.Character
+    local h = ch and ch:FindFirstChildOfClass("Humanoid")
+    local r = roleState.roles and roleState.roles[p.Name]
+    if h and h.Health > 0 and ch:FindFirstChild("HumanoidRootPart") and not (r and (r.Dead == true or r.Killed == true)) then return ch end
+    return nil
+end
+local duel = {on = false, mode = "Zombie", mine = nil, foes = {}}
+function duel.isFoe(p)
+    if p == LP then return false end
+    local mine, theirs = roleOf(LP), roleOf(p)
+    if mine == "Zombie" then return theirs == "Survivor" end
+    if mine == "Survivor" then return theirs == "Zombie" end
+    return false
+end
+duel.alive = aliveChar
+local function refreshDuel()
+    local zombies, survivors = 0, 0
+    for _, p in ipairs(Players:GetPlayers()) do
+        local r = roleOf(p)
+        if r == "Zombie" then zombies += 1 elseif r == "Survivor" then survivors += 1 end
+    end
+    local mine = roleOf(LP)
+    duel.on = (zombies > 0 and survivors > 0) and (mine == "Zombie" or mine == "Survivor")
+    duel.mine = duel.on and (mine == "Survivor" and "prey" or "hunt") or nil
+    table.clear(duel.foes)
+    if duel.on then
+        for _, p in ipairs(Players:GetPlayers()) do if duel.isFoe(p) then duel.foes[p.Name] = true end end
+    end
+end
+local function getKnife()
+    local ch = LP.Character
+    if not ch then return nil end
+    local k = ch:FindFirstChild("Knife")
+    if k then return k end
+    local bp = LP:FindFirstChild("Backpack")
+    k = bp and bp:FindFirstChild("Knife")
+    if k and k:IsA("Tool") then k.Parent = ch; return k end
+    return nil
+end
+-- Kill All as Zombie: ножом по всем врагам; true, пока есть живые цели
+local function killPass()
+    if not duel.on then return false end
+    local knife = getKnife()
+    local handle = knife and (knife:FindFirstChild("Handle") or knife:FindFirstChildWhichIsA("BasePart"))
+    if not handle then return false end
+    local any = false
+    for _, p in ipairs(Players:GetPlayers()) do
+        if duel.isFoe(p) then
+            local ch = aliveChar(p)
+            if ch then
+                any = true
+                for _, name in ipairs({"HumanoidRootPart", "UpperTorso", "Torso", "LowerTorso", "Head"}) do
+                    local part = ch:FindFirstChild(name)
+                    if part and firetouchinterest then
+                        pcall(function()
+                            firetouchinterest(handle, part, 0); firetouchinterest(handle, part, 1)
+                            firetouchinterest(part, handle, 0); firetouchinterest(part, handle, 1)
+                        end)
+                    end
+                end
+                pcall(function() knife:Activate() end)
+            end
+        end
+    end
+    return any
+end
+-- fling игрока (для "fling gun holders"): возвращает true, если цель улетела/умерла
+local function flingPlayer(target, opts)
+    opts = opts or {}
+    local tch = target and target.Character
+    local tRoot = tch and tch:FindFirstChild("HumanoidRootPart")
+    local ch, hum, hrp = getChar()
+    if not (tRoot and ch) then return false end
+    flingBusy = true
+    local home = hrp.CFrame
+    local startPos = tRoot.Position
+    local done = false
+    hum.PlatformStand = true
+    local t0 = os.clock()
+    local limit = tonumber(opts.time) or 4
+    while alive and os.clock() - t0 < limit do
+        if opts.stop and opts.stop() then break end
+        local c2, _, r2 = getChar()
+        tRoot = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+        if not (c2 and tRoot) then done = true; break end
+        if (tRoot.Position - startPos).Magnitude > 140 or tRoot.Position.Y < -200 then done = true; break end
+        r2.CanCollide = true
+        r2.CFrame = tRoot.CFrame * CFrame.new((math.random() - 0.5) * 1.2, 0, (math.random() - 0.5) * 1.2)
+        r2.AssemblyAngularVelocity = Vector3.new(0, 3e4, 0)
+        r2.AssemblyLinearVelocity = Vector3.zero
+        RunService.Heartbeat:Wait()
+    end
+    local _, h3, r3 = getChar()
+    if r3 then
+        r3.AssemblyAngularVelocity = Vector3.zero
+        r3.AssemblyLinearVelocity = Vector3.zero
+        r3.CFrame = home
+        h3.PlatformStand = false
+    end
+    flingBusy = false
+    return done
+end
+do
+    local g = getgenv()
+    g.__pulseDuel = duel
+    g.__pulseKillPass = killPass
+    g.__pulseFlingPersist = flingPlayer
+end
+task.spawn(function()
+    while alive do
+        pcall(refreshDuel)
+        task.wait(0.4)
+    end
+end)
+
+local lastFullFling, fullSince = 0, nil
 local function handleFull()
     fState.flinging = true
+    lastFullFling = os.clock()
     setStatus("Bag full → fling murderer", AMBER)
     local okF, flung = pcall(flingMurderer)
     if not (okF and flung) then setStatus("No murderer found", AMBER) end
-    setStatus("Waiting for round end", AMBER)
-    local t0 = os.clock()
-    while alive and cfg.farm and fState.round and os.clock() - t0 < 25 do task.wait(0.5) end
-    if alive and cfg.farm and fState.round then
-        local _, hum2 = getChar()
-        if hum2 then
-            setStatus("Round did not end → reset", AMBER)
-            hum2.Health = 0
-            task.wait(3)
+    if not cfg.respawnOnFull then
+        setStatus("Waiting for round end", AMBER)
+        local t0 = os.clock()
+        while alive and cfg.farm and fState.round and os.clock() - t0 < 25 do task.wait(0.5) end
+        if alive and cfg.farm and fState.round then
+            local _, hum2 = getChar()
+            if hum2 then
+                setStatus("Round did not end → reset", AMBER)
+                hum2.Health = 0
+                task.wait(3)
+            end
         end
     end
     fState.flinging = false
 end
+-- постоянный ноклип на все части персонажа (в т.ч. оружие в руках)
+bind(RunService.Stepped, function()
+    if not (cfg.noclip and cfg.farm) or flingBusy then return end
+    local ch = LP.Character
+    if not ch then return end
+    for _, d in ipairs(ch:GetDescendants()) do
+        if d:IsA("BasePart") and d.CanCollide then d.CanCollide = false end
+    end
+end)
 task.spawn(function()
     while alive do
         task.wait(0.25)
@@ -1352,12 +1509,28 @@ task.spawn(function()
         end
         if not cfg.farm then
             setStatus("Idle", GREY)
+            fullSince = nil
         elseif not fState.flinging then
             local st = fApi.getStatus()
+            if st ~= "full" then fullSince = nil end
             if st == "waiting" then setStatus("Waiting for round", GREY)
             elseif st == "spectating" then setStatus("Spectating / dead", GREY)
             elseif st == "full" then
-                setStatus("Bag full", AMBER)
+                fullSince = fullSince or os.clock()
+                local rr = roleState.roles and roleState.roles[LP.Name]
+                local isMurd = rr and tostring(rr.Role) == "Murderer"
+                local gunHeld = SheriffRuntime.gun(ctx) ~= nil
+                local shooter = cfg.shootOnFull and gunHeld
+                if isMurd and cfg.killAura then
+                    setStatus("Bag full → killing everyone", AMBER)
+                elseif shooter and os.clock() - fullSince < 9 then
+                    setStatus("Bag full → shooting murderer", AMBER)
+                else
+                    setStatus("Bag full", AMBER)
+                    if cfg.flingFull and not isMurd and fState.round and fState.active and os.clock() - lastFullFling > 12 then
+                        task.spawn(handleFull)
+                    end
+                end
             else setStatus("Farming", GREEN) end
         end
     end
@@ -2104,7 +2277,7 @@ local function cycleRow(parent, y, label, key, options)
 end
 local ctlScroll = New("ScrollingFrame", {
     Position = UDim2.fromOffset(0, 62), Size = UDim2.new(1, 0, 1, -66), BackgroundTransparency = 1, BorderSizePixel = 0,
-    ScrollBarThickness = 3, ScrollBarImageColor3 = C.border, CanvasSize = UDim2.new(0, 0, 0, 340),
+    ScrollBarThickness = 3, ScrollBarImageColor3 = C.border, CanvasSize = UDim2.new(0, 0, 0, 580),
 }, ctlCard)
 cycleRow(ctlScroll, 0, "Method", "method", {"Under Map", "Teleport", "Fast"})
 sliderRow(ctlScroll, 32, "Speed", "speed", 8, 22)
@@ -2113,7 +2286,13 @@ toggleRow(ctlScroll, 112, "Shoot Murderer on full bag", "shootOnFull")
 toggleRow(ctlScroll, 144, "Auto-Respawn on full bag", "respawnOnFull")
 toggleRow(ctlScroll, 176, "Avoid murderer", "avoid")
 toggleRow(ctlScroll, 208, "Auto-Fling Murder after respawn", "flingAfterRespawn")
-local note = text(ctlScroll, "Full bag: if you hold the gun, shoot the murderer; otherwise reset (if Auto-Respawn is on) or hide and wait. Under Map = safest. Teleport = fastest. Fast = direct flight.", 13, C.sub, UDim2.fromOffset(14, 250), UDim2.new(1, -28, 0, 70))
+toggleRow(ctlScroll, 240, "Fling murderer on full bag", "flingFull")
+toggleRow(ctlScroll, 272, "Kill all on full bag (murderer role)", "killAura")
+toggleRow(ctlScroll, 304, "Noclip while farming", "noclip")
+toggleRow(ctlScroll, 336, "Zombies: shoot as Survivor", "zShoot")
+toggleRow(ctlScroll, 368, "Zombies: Kill All as Zombie", "zKill")
+toggleRow(ctlScroll, 400, "Zombies: fling gun holders after reset", "zFling")
+local note = text(ctlScroll, "Full bag order: murderer role → kill all; holding the gun → shoot the murderer (9s), then fling; no gun → fling the murderer. Auto-Respawn resets after the fling. Under Map = safest, Teleport = fastest, Fast = direct flight.", 13, C.sub, UDim2.fromOffset(14, 440), UDim2.new(1, -28, 0, 110))
 note.TextWrapped = true
 note.TextYAlignment = Enum.TextYAlignment.Top
 note.TextTruncate = Enum.TextTruncate.None
@@ -2136,7 +2315,7 @@ for _, d in ipairs({
     {"uptime", "Session time"}, {"coins", "Session collected"}, {"bags", "By type"}, {"rate", "Per hour"}, {"day", "Projected per day"},
     {"best", "Best rate"}, {"rounds", "Rounds this session"}, {"avg", "Avg per round"}, {"total", "All-time collected"},
     {"alltime", "All-time farm time"}, {"sessions", "Sessions started"}, {"kicks", "Kicks / disconnects"},
-    {"rejoins", "Auto rejoins"}, {"bagdbg", "Bag detect"}, {"murd", "Murderer"}, {"reason", "Last disconnect"}, {"ping", "Ping"}, {"fps", "FPS"},
+    {"rejoins", "Auto rejoins"}, {"bagdbg", "Bag detect"}, {"murd", "Murderer"}, {"phase", "Engine phase"}, {"err", "Engine error"}, {"role", "My role"}, {"mode", "Zombie mode"}, {"shot", "Last shot"}, {"reason", "Last disconnect"}, {"ping", "Ping"}, {"fps", "FPS"},
 }) do statRow(d[1], d[2]) end
 
 -- Safety page
@@ -2306,6 +2485,12 @@ task.spawn(function()
                 rows.rejoins.Text = tostring(totals.rejoins)
                 rows.bagdbg.Text = (isFullNow() and "FULL" or "not full")
                 rows.murd.Text = murdererName()
+                rows.phase.Text = tostring(fMotion.phase or "-") .. " · " .. tostring(cfg.method)
+                rows.err.Text = fMotion.err and tostring(fMotion.err):sub(1, 60) or "none"
+                local rl = roleState.roles and roleState.roles[LP.Name]
+                rows.role.Text = rl and tostring(rl.Role) or "unknown"
+                rows.shot.Text = shotDbg.text
+                rows.mode.Text = duel.on and (duel.mine == "prey" and "Survivor (prey)" or "Zombie (hunt)") or "off"
                 rows.reason.Text = totals.lastReason
                 rows.ping.Text = string.format("%d ms", ping)
                 rows.fps.Text = string.format("%d", fps)
@@ -2320,6 +2505,7 @@ getgenv().FlinFarmCleanup = function()
     alive = false
     cfg.farm = false
     pcall(fStop)
+    pcall(function() local g = getgenv(); g.__pulseDuel, g.__pulseKillPass, g.__pulseFlingPersist = nil, nil, nil end)
     pcall(function() RunService:Set3dRenderingEnabled(true) end)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     pcall(function() gui:Destroy() end)
