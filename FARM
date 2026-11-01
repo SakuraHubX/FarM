@@ -36,7 +36,7 @@ local cfg = {
     farm = false, method = "Under Map", speed = 21, fullAction = "Fling murderer", avoid = true,
     autoRejoin = true, antiAfk = true, autoStart = true, renderOff = false, potato = false, whiteScreen = false,
     adaptive = true, url = "", minPlayers = 4,
-    pickGun = true, shootOnFull = true, respawnOnFull = false, flingAfterRespawn = false, flingFull = true, killAura = true, noclip = true, zShoot = true, zKill = true, zFling = true,
+    pickGun = true, shootOnFull = true, respawnOnFull = false, flingAfterRespawn = false, flingFull = true, tpSpeed = 25, fastSpeed = 24, killAura = true, noclip = true, zShoot = true, zKill = true, zFling = true,
     webhookUrl = "", webhookOn = false, webhookMinutes = 10, webhookKick = true,
 }
 local totals = {coins = 0, sessions = 0, rounds = 0, kicks = 0, rejoins = 0, bestRate = 0, seconds = 0, lastReason = "-", bags = {}}
@@ -105,7 +105,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
 local ENV = {os = os, tick = tick, task = task, Vector3 = Vector3, CFrame = CFrame, Enum = Enum, Instance = Instance,
     RaycastParams = RaycastParams, OverlapParams = OverlapParams, getgenv = getgenv, math = math, pcall = pcall,
-    firetouchinterest = firetouchinterest, isfile = isfile, readfile = readfile, writefile = writefile, game = game}
+    firetouchinterest = firetouchinterest, isfile = isfile, readfile = readfile, writefile = writefile,
+    isfolder = isfolder, makefolder = makefolder, game = game}
 
 -- role data (client module, no server calls)
 local roleState = {roles = {}, refreshing = false, last = 0}
@@ -1122,6 +1123,179 @@ function FarmRuntime.tick(context, state, motion, runtime, delta)
 	if method == "Fast" then FarmMotion.fast(context, state, motion, options); return end
 	FarmMotion.underMap(context, state, motion, options)
 end
+FarmRuntime.MapFarm = {}
+
+function FarmRuntime.MapFarm.create(context)
+	local environment = context.environment
+	local farm = {file = "FlinFarm/mm2_mapfarm.json", data = {}, dirty = false, K = 1.3, first = setmetatable({}, {__mode = "k"})}
+	farm.SEED = {house2 = 20.1, hospital3 = 21.7, office3 = 23.4, mansion2 = 24.7, hotel2 = 24.8, bank2 = 25,
+		policestation = 25.2, factory = 26.5, biolab = 27, manor = 27.4, barn = 29.2, researchfacility = 29.9,
+		vampirescastle = 30.2, farmhouse = 30.9, spaceship = 31.9, mineshaft = 34.7, workplace = 39, milbase = 41.8}
+	pcall(function()
+		if type(environment.isfile) ~= "function" or not environment.isfile(farm.file) then return end
+		local data = context.http:JSONDecode(environment.readfile(farm.file))
+		if type(data) == "table" then farm.data = data end
+	end)
+	farm.alias = type(farm.data.__alias) == "table" and farm.data.__alias or {}
+	farm.data.__alias = farm.alias
+	if farm.alias.hotel == nil then farm.alias.hotel = "hotel2" end
+	if farm.alias.vampirecastle == nil then farm.alias.vampirecastle = "vampirescastle" end
+	farm.key = function(name) return (string.lower(tostring(name or "")):gsub("[^%w]", "")) end
+	farm.rec = function(key)
+		if type(farm.data[key]) ~= "table" then farm.data[key] = {h = 0, d = 0, nn = 0, nnN = 0} end
+		return farm.data[key]
+	end
+	farm.merge = function(key, target)
+		farm.alias[key] = target
+		local source = farm.data[key]
+		if type(source) == "table" then
+			local result = farm.rec(target)
+			for _, field in {"h", "d", "nn", "nnN"} do result[field] = (tonumber(result[field]) or 0) + (tonumber(source[field]) or 0) end
+			farm.data[key] = nil
+		end
+		farm.dirty = true
+	end
+	farm.guess = function(key, exists)
+		for _, suffix in {"2", "3"} do if exists(key .. suffix) then return key .. suffix end end
+		local base = key:match("^(.-)%d+$")
+		if base and base ~= "" and exists(base) then return base end
+		return nil
+	end
+	farm.fix = function(exists)
+		local merges = {}
+		for key, record in farm.data do
+			if key == "__alias" or type(record) ~= "table" or exists(key) then continue end
+			local target = type(farm.alias[key]) == "string" and farm.alias[key] or farm.guess(key, exists)
+			if target then table.insert(merges, {key, target}) end
+		end
+		for _, pair in merges do farm.merge(pair[1], pair[2]) end
+	end
+	farm.ckey = function(name, map)
+		local key = farm.key(name)
+		if type(farm.alias[key]) == "string" then return farm.alias[key] end
+		local vote = rawget(environment.getgenv(), "__pulseVoteDbg")
+		if not vote or type(vote.isKey) ~= "function" or vote.isKey(key) then return key end
+		local guess = farm.guess(key, vote.isKey)
+		if guess then farm.merge(key, guess); return guess end
+		local win, first = vote.lastWin, map and farm.first[map]
+		if not first or type(win) ~= "table" or type(win.k) ~= "string" or not vote.isKey(win.k) then return key end
+		local time = tonumber(win.t) or 0
+		if first < time - 1 or first - time >= 120 then return key end
+		if farm.alias[win.k] ~= nil then return key end
+		farm.merge(key, win.k)
+		return win.k
+	end
+	farm.measured = function(key)
+		local record = farm.data[key]
+		return type(record) == "table" and ((tonumber(record.h) or 0) >= 12 or (tonumber(record.nnN) or 0) >= 3) or false
+	end
+	farm.map = function()
+		for _, map in context.workspace:GetChildren() do
+			if not map:IsA("Model") or not map:FindFirstChild("CoinContainer") then continue end
+			if not farm.first[map] then farm.first[map] = environment.os.clock() end
+			return map
+		end
+		return nil
+	end
+	farm.at = function()
+		local motion = rawget(environment.getgenv(), "__pulseFarmUF")
+		local teleport = motion and motion.tp
+		if teleport and teleport.touchC and teleport.touchC.Parent and environment.os.clock() - (teleport.touchT or 0) < 1.5 then
+			return teleport.touchC.Position
+		end
+		local character = context.player.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		return root and root.Position or nil
+	end
+	farm.hop = function()
+		local now, map, position = environment.os.clock(), farm.map(), farm.at()
+		if position and map and farm.lp and farm.lk == map.Name and now - (farm.lt or 0) < 6 then
+			local distance = (position - farm.lp).Magnitude
+			if distance < 400 then
+				local record = farm.rec(farm.ckey(map.Name, map))
+				record.h = (tonumber(record.h) or 0) + 1
+				record.d = (tonumber(record.d) or 0) + distance
+				if record.h > 400 then record.h, record.d = record.h / 2, record.d / 2 end
+				farm.dirty = true
+			end
+		end
+		farm.lp, farm.lt, farm.lk = position, now, map and map.Name or nil
+	end
+	farm.calib = function()
+		local hops, nearest = 0, 0
+		for _, record in farm.data do
+			if type(record) ~= "table" or (tonumber(record.h) or 0) < 15 or (tonumber(record.nnN) or 0) < 3 then continue end
+			hops += record.d / record.h
+			nearest += record.nn / record.nnN
+		end
+		if hops > 0 and nearest > 0 then farm.K = math.clamp(hops / nearest, 0.8, 3) end
+	end
+	farm.hopOf = function(key)
+		local record = farm.data[key]
+		if type(record) == "table" then
+			if (tonumber(record.h) or 0) >= 12 then return record.d / record.h end
+			if (tonumber(record.nnN) or 0) >= 3 then return record.nn / record.nnN * farm.K end
+		end
+		return farm.SEED[key]
+	end
+	farm.save = function()
+		if not farm.dirty or type(environment.writefile) ~= "function" then return end
+		farm.dirty = false
+		pcall(function()
+			if type(environment.isfolder) == "function" and not environment.isfolder("FlinFarm") and type(environment.makefolder) == "function" then
+				environment.makefolder("FlinFarm")
+			end
+			environment.writefile(farm.file, context.http:JSONEncode(farm.data))
+		end)
+	end
+	return farm
+end
+
+function FarmRuntime.MapFarm.sample(farm)
+	local map = farm.map()
+	local container = map and map:FindFirstChild("CoinContainer")
+	if not container then return end
+	local positions = {}
+	for _, coin in container:GetChildren() do
+		if coin:IsA("BasePart") and coin:FindFirstChild("TouchInterest") and not coin:GetAttribute("Collected") then
+			table.insert(positions, coin.Position)
+		end
+	end
+	if #positions < 8 then return end
+	local total = 0
+	for index, position in positions do
+		local nearest = math.huge
+		for other, target in positions do
+			if index ~= other then nearest = math.min(nearest, (position - target).Magnitude) end
+		end
+		total += math.min(nearest, 300)
+	end
+	local record = farm.rec(farm.ckey(map.Name, map))
+	record.nn = (tonumber(record.nn) or 0) + total / #positions
+	record.nnN = (tonumber(record.nnN) or 0) + 1
+	if record.nnN > 200 then record.nn, record.nnN = record.nn / 2, record.nnN / 2 end
+	farm.dirty = true
+end
+
+function FarmRuntime.MapFarm.install(context, active)
+	local farm, environment = FarmRuntime.MapFarm.create(context), context.environment
+	environment.getgenv().__pulseMapFarm = farm
+	environment.task.spawn(function()
+		local saved = environment.os.clock()
+		while active() do
+			environment.task.wait(3)
+			pcall(FarmRuntime.MapFarm.sample, farm)
+			if environment.os.clock() - saved > 20 then
+				saved = environment.os.clock()
+				pcall(farm.calib)
+				farm.save()
+			end
+		end
+	end)
+	return farm
+end
+
+
 function FarmRuntime.install(context)
 	local environment, globals = context.environment, context.environment.getgenv()
 	globals.FLIN_FARM_MM2_VERSION = (globals.FLIN_FARM_MM2_VERSION or 0) + 1
@@ -1148,6 +1322,7 @@ function FarmRuntime.install(context)
 		return FarmState.isFull(context, state, environment.tick()) and "full" or "farming"
 	end
 	globals.__pulseFarmAPI = api
+	local mapFarm = FarmRuntime.MapFarm.install(context, function() return globals.FLIN_FARM_MM2_HEARTBEAT and globals.FLIN_FARM_MM2_VERSION == generation and context.isAlive() end)
 	local function active() return globals.FLIN_FARM_MM2_HEARTBEAT and globals.FLIN_FARM_MM2_VERSION == generation and context.isAlive() end
 	local runtime = {roundAt = 0, gunAt = 0}
 	context.connect(context.runService.Heartbeat, function(delta)
@@ -1191,6 +1366,7 @@ function FarmRuntime.install(context)
 		end)
 		listen("RoundEndFade", function() FarmState.roundEnd(state); if onRoundEnd then pcall(onRoundEnd) end end)
 		listen("CoinCollected", function(kind, count, maximum)
+			if state.enabled then pcall(mapFarm.hop) end
 			motion.evAt = environment.os.clock()
 			local character = context.player.Character
 			local root = character and character:FindFirstChild("HumanoidRootPart")
@@ -1319,8 +1495,9 @@ end
 local function syncFarmCfg()
     farmCfg.method = cfg.method
     farmCfg.speed = math.clamp(cfg.speed, 8, 22)
-    farmCfg.fastSpeed = math.clamp(cfg.speed + 3, 8, 24)
-    farmCfg.tpSpeed = math.clamp(cfg.speed + 4, 10, 26)
+    local k = math.min(1, cfg.speed / 21)
+    farmCfg.fastSpeed = math.clamp(math.floor(cfg.fastSpeed * k + 0.5), 8, 24)
+    farmCfg.tpSpeed = math.clamp(math.floor(cfg.tpSpeed * k + 0.5), 10, 26)
     fState.respawnOnFull = cfg.respawnOnFull
     fState.avoidMurder = cfg.avoid
     fState.pickGun = cfg.pickGun
@@ -2277,22 +2454,24 @@ local function cycleRow(parent, y, label, key, options)
 end
 local ctlScroll = New("ScrollingFrame", {
     Position = UDim2.fromOffset(0, 62), Size = UDim2.new(1, 0, 1, -66), BackgroundTransparency = 1, BorderSizePixel = 0,
-    ScrollBarThickness = 3, ScrollBarImageColor3 = C.border, CanvasSize = UDim2.new(0, 0, 0, 580),
+    ScrollBarThickness = 3, ScrollBarImageColor3 = C.border, CanvasSize = UDim2.new(0, 0, 0, 680),
 }, ctlCard)
 cycleRow(ctlScroll, 0, "Method", "method", {"Under Map", "Teleport", "Fast"})
-sliderRow(ctlScroll, 32, "Speed", "speed", 8, 22)
-toggleRow(ctlScroll, 80, "Pick Up Gun", "pickGun")
-toggleRow(ctlScroll, 112, "Shoot Murderer on full bag", "shootOnFull")
-toggleRow(ctlScroll, 144, "Auto-Respawn on full bag", "respawnOnFull")
-toggleRow(ctlScroll, 176, "Avoid murderer", "avoid")
-toggleRow(ctlScroll, 208, "Auto-Fling Murder after respawn", "flingAfterRespawn")
-toggleRow(ctlScroll, 240, "Fling murderer on full bag", "flingFull")
-toggleRow(ctlScroll, 272, "Kill all on full bag (murderer role)", "killAura")
-toggleRow(ctlScroll, 304, "Noclip while farming", "noclip")
-toggleRow(ctlScroll, 336, "Zombies: shoot as Survivor", "zShoot")
-toggleRow(ctlScroll, 368, "Zombies: Kill All as Zombie", "zKill")
-toggleRow(ctlScroll, 400, "Zombies: fling gun holders after reset", "zFling")
-local note = text(ctlScroll, "Full bag order: murderer role → kill all; holding the gun → shoot the murderer (9s), then fling; no gun → fling the murderer. Auto-Respawn resets after the fling. Under Map = safest, Teleport = fastest, Fast = direct flight.", 13, C.sub, UDim2.fromOffset(14, 440), UDim2.new(1, -28, 0, 110))
+sliderRow(ctlScroll, 32, "Farm speed (Under Map)", "speed", 8, 22)
+sliderRow(ctlScroll, 76, "Teleport speed", "tpSpeed", 10, 26)
+sliderRow(ctlScroll, 120, "Fast speed", "fastSpeed", 8, 24)
+toggleRow(ctlScroll, 168, "Pick Up Gun", "pickGun")
+toggleRow(ctlScroll, 200, "Shoot Murderer on full bag", "shootOnFull")
+toggleRow(ctlScroll, 232, "Auto-Respawn on full bag", "respawnOnFull")
+toggleRow(ctlScroll, 264, "Avoid murderer", "avoid")
+toggleRow(ctlScroll, 296, "Auto-Fling Murder after respawn", "flingAfterRespawn")
+toggleRow(ctlScroll, 328, "Fling murderer on full bag", "flingFull")
+toggleRow(ctlScroll, 360, "Kill all on full bag (murderer role)", "killAura")
+toggleRow(ctlScroll, 392, "Noclip while farming", "noclip")
+toggleRow(ctlScroll, 424, "Zombies: shoot as Survivor", "zShoot")
+toggleRow(ctlScroll, 456, "Zombies: Kill All as Zombie", "zKill")
+toggleRow(ctlScroll, 488, "Zombies: fling gun holders after reset", "zFling")
+local note = text(ctlScroll, "Full bag order: murderer role → kill all; holding the gun → shoot the murderer (9s), then fling; no gun → fling the murderer. Auto-Respawn resets after the fling. Under Map = safest, Teleport = fastest, Fast = direct flight.", 13, C.sub, UDim2.fromOffset(14, 540), UDim2.new(1, -28, 0, 110))
 note.TextWrapped = true
 note.TextYAlignment = Enum.TextYAlignment.Top
 note.TextTruncate = Enum.TextTruncate.None
@@ -2315,7 +2494,7 @@ for _, d in ipairs({
     {"uptime", "Session time"}, {"coins", "Session collected"}, {"bags", "By type"}, {"rate", "Per hour"}, {"day", "Projected per day"},
     {"best", "Best rate"}, {"rounds", "Rounds this session"}, {"avg", "Avg per round"}, {"total", "All-time collected"},
     {"alltime", "All-time farm time"}, {"sessions", "Sessions started"}, {"kicks", "Kicks / disconnects"},
-    {"rejoins", "Auto rejoins"}, {"bagdbg", "Bag detect"}, {"murd", "Murderer"}, {"phase", "Engine phase"}, {"err", "Engine error"}, {"role", "My role"}, {"mode", "Zombie mode"}, {"shot", "Last shot"}, {"reason", "Last disconnect"}, {"ping", "Ping"}, {"fps", "FPS"},
+    {"rejoins", "Auto rejoins"}, {"bagdbg", "Bag detect"}, {"murd", "Murderer"}, {"phase", "Engine phase"}, {"err", "Engine error"}, {"role", "My role"}, {"mode", "Zombie mode"}, {"map", "Map / avg hop"}, {"shot", "Last shot"}, {"reason", "Last disconnect"}, {"ping", "Ping"}, {"fps", "FPS"},
 }) do statRow(d[1], d[2]) end
 
 -- Safety page
@@ -2490,6 +2669,14 @@ task.spawn(function()
                 local rl = roleState.roles and roleState.roles[LP.Name]
                 rows.role.Text = rl and tostring(rl.Role) or "unknown"
                 rows.shot.Text = shotDbg.text
+                pcall(function()
+                    local mf = getgenv().__pulseMapFarm
+                    local mp = mf and mf.map()
+                    if mp then
+                        local hop = mf.hopOf(mf.ckey(mp.Name, mp))
+                        rows.map.Text = mp.Name .. (hop and string.format(" · %.1f studs", hop) or " · learning")
+                    else rows.map.Text = "-" end
+                end)
                 rows.mode.Text = duel.on and (duel.mine == "prey" and "Survivor (prey)" or "Zombie (hunt)") or "off"
                 rows.reason.Text = totals.lastReason
                 rows.ping.Text = string.format("%d ms", ping)
@@ -2505,7 +2692,7 @@ getgenv().FlinFarmCleanup = function()
     alive = false
     cfg.farm = false
     pcall(fStop)
-    pcall(function() local g = getgenv(); g.__pulseDuel, g.__pulseKillPass, g.__pulseFlingPersist = nil, nil, nil end)
+    pcall(function() local g = getgenv(); g.__pulseDuel, g.__pulseKillPass, g.__pulseFlingPersist, g.__pulseMapFarm = nil, nil, nil, nil end)
     pcall(function() RunService:Set3dRenderingEnabled(true) end)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     pcall(function() gui:Destroy() end)
